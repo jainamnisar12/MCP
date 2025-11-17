@@ -186,15 +186,25 @@ def create_website_vector_store(urls: List[str], output_path: str = None):
 
     print(f"✓ Scraped {len(documents)} website(s)")
 
-    # Step 2: Split into SMALLER chunks with MORE overlap
+    # Step 2: Split into semantic chunks with good overlap
     print("\n[2/4] Splitting into chunks...")
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,  # REDUCED from 1500
-        chunk_overlap=200,  # INCREASED from 150
-        separators=["\n## ", "\n### ", "\n\n", "\n", " ", ""]  # Better separators
+        chunk_size=1800,  # INCREASED for more complete context
+        chunk_overlap=400,  # INCREASED for better continuity
+        separators=[
+            "\n=== ",     # Main section markers
+            "\n## ",      # Headers
+            "\n### ",     # Subheaders
+            "\n\n",       # Paragraphs
+            "\n",         # Lines
+            ". ",         # Sentences
+            " ",          # Words
+            ""            # Characters
+        ],
+        length_function=len,
     )
     docs = text_splitter.split_documents(documents)
-    print(f"✓ Created {len(docs)} text chunks")
+    print(f"✓ Created {len(docs)} text chunks (avg {sum(len(d.page_content) for d in docs)//len(docs)} chars/chunk)")
     
     # Print sample chunks for debugging
     print("\n📝 Sample chunks:")

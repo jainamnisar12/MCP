@@ -628,9 +628,19 @@ def ask_document(question: str, source: str = "all") -> str:
         all_docs = []
         
         for source_name, store in stores_to_search:
-            # Get MORE documents (k=5 instead of k=3)
-            docs = store.similarity_search(question, k=5)
-            
+            # Use MMR (Maximal Marginal Relevance) for better diversity and relevance
+            try:
+                # Try MMR first for better diverse results
+                docs = store.max_marginal_relevance_search(
+                    question,
+                    k=7,           # Get 7 documents
+                    fetch_k=20,    # From pool of 20 candidates
+                    lambda_mult=0.7  # Balance relevance (0.7) vs diversity (0.3)
+                )
+            except:
+                # Fallback to regular similarity search
+                docs = store.similarity_search(question, k=7)
+
             # Add source info and score to metadata
             for i, doc in enumerate(docs):
                 doc.metadata['search_source'] = source_name
@@ -658,8 +668,8 @@ def ask_document(question: str, source: str = "all") -> str:
             )
             return "I couldn't find any relevant information to answer that question."
         
-        # Take top 5-7 results for better coverage
-        all_docs = all_docs[:7]
+        # Take top 10 results for better coverage and complete answers
+        all_docs = all_docs[:10]
         
         # Build context with source attribution
         context_parts = []
