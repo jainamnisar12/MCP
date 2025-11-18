@@ -21,6 +21,7 @@ from schema_cache_manager import (
 )
 
 from table_context import ACCESS_CONTROL
+from table_retriever import TableRetriever
 
 # --- Configure Audit Logging ---
 audit_logger = logging.getLogger('mcp_security_audit')
@@ -216,13 +217,29 @@ try:
         print(f"✓ Fresh schema fetched and cached")
     
     print(f"✓ Schema loaded for {len(schema_info)} tables")
-    
+
 except Exception as e:
     print(f"❌ ERROR: Could not load schema: {str(e)}")
     raise
 
+# --- Initialize Table Retriever for RAG ---
+print("\n[4/5] Initializing Table RAG Retriever...")
+try:
+    table_retriever = TableRetriever()
+    rag_initialized = table_retriever.initialize()
+
+    if rag_initialized:
+        print("✓ Table RAG retriever initialized successfully")
+    else:
+        print("⚠️  Table RAG retriever not available - using fallback (all tables)")
+        table_retriever = None
+except Exception as e:
+    print(f"⚠️  Could not initialize table retriever: {e}")
+    print("   Using fallback mode with all tables")
+    table_retriever = None
+
 # --- Display Schema ---
-print("\n[4/5] Schema loaded successfully")
+print("\n[5/5] Schema and RAG loaded successfully")
 print("\n" + "="*60)
 print("📚 SCHEMA SUMMARY:")
 print("="*60)
@@ -523,7 +540,7 @@ sql_prompt = ChatPromptTemplate.from_messages([
       WHERE merchant_vpa = {{current_user}}
 
     Database schema:
-    {formatted_schema}
+    {{formatted_schema}}
     """),
     ("human", "{question}")
 ])
@@ -755,12 +772,43 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
             )
             return error_msg
 
-    # 4. Generate SQL with timing
+    # 4. Retrieve relevant tables using RAG (before SQL generation)
+    rag_retrieval_start = time.time()
+    relevant_schema_text = formatted_schema  # Default fallback
+
+    if table_retriever:
+        try:
+            print(f"\n[RAG] Retrieving relevant tables for query...")
+            relevant_tables = table_retriever.retrieve_relevant_tables(
+                natural_language_query,
+                k=3  # Retrieve top 3 most relevant tables
+            )
+
+            if relevant_tables:
+                table_names = [t['table_name'] for t in relevant_tables]
+                print(f"[RAG] Retrieved tables: {', '.join(table_names)}")
+
+                # Log similarity scores
+                for table in relevant_tables:
+                    print(f"      • {table['table_name']} (score: {table['similarity_score']})")
+
+                # Get schema text for only the relevant tables
+                relevant_schema_text = table_retriever.get_table_schema_text(table_names)
+            else:
+                print(f"[RAG] No relevant tables found, using all tables")
+        except Exception as e:
+            print(f"[RAG] Warning: Retrieval failed ({e}), using all tables")
+
+    rag_retrieval_time = time.time() - rag_retrieval_start
+    print(f"⏱️  Table RAG Retrieval: {rag_retrieval_time:.3f}s")
+
+    # 5. Generate SQL with timing (using retrieved schema)
     sql_gen_start = time.time()
     sql_response = sql_generation_chain.invoke({
         "question": natural_language_query,
         "current_user": f"'{current_user}'",
-        "user_type": user_type
+        "user_type": user_type,
+        "formatted_schema": relevant_schema_text  # Use RAG-retrieved schema
     })
     sql_gen_time = time.time() - sql_gen_start
     sql_query = sql_response.content.strip()
