@@ -10,9 +10,9 @@ from datetime import datetime, timedelta
 from google.cloud import bigquery
 from fastmcp import FastMCP
 from langchain_google_vertexai import ChatVertexAI, VertexAIEmbeddings
-from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from typing import Optional, Tuple
+from agent.bigquery_vector_store import BigQueryVectorStore
 from collections import defaultdict
 from google.cloud import storage, aiplatform
 from google.auth import default
@@ -360,49 +360,33 @@ for table_name in schema_info.keys():
     print(f"  • {table_name}: {len(schema_info[table_name]['fields'])} columns")
 print("="*60 + "\n")
 
-# --- Load Vector Stores ---
-print("[5/6] Loading vector stores for document queries...")
+# --- Load BigQuery Vector Store ---
+print("[5/6] Initializing BigQuery Vector Store for document queries...")
 
-# Load PDF vector store
-pdf_vector_store = None
+# Initialize BigQuery Vector Store (unified storage for all embeddings)
+bigquery_vector_store = None
 try:
-    if os.path.exists(os.path.join(config.VECTOR_STORE_PATH, "index.faiss")):
-        pdf_vector_store = FAISS.load_local(
-            config.VECTOR_STORE_PATH,
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
-        print(f"✓ PDF vector store loaded from {config.VECTOR_STORE_PATH}")
+    bigquery_vector_store = BigQueryVectorStore(
+        dataset_name=config.BIGQUERY_DATASET
+    )
+
+    # Check what embeddings are available
+    stats = bigquery_vector_store.get_stats()
+
+    if stats:
+        print(f"✓ BigQuery Vector Store initialized")
+        print(f"  Available embeddings:")
+        for source_type, count in stats.items():
+            print(f"    • {source_type}: {count} embeddings")
     else:
-        print(f"⚠️  PDF vector store not found at {config.VECTOR_STORE_PATH}")
-        print("   Run 'python -m agent.pdf_indexer' to create it.")
+        print("⚠️  BigQuery Vector Store initialized but no embeddings found")
+        print("   Run the Cloud Function to populate embeddings:")
+        print("   curl https://schema-refresh-weekly-t5cfvcdcma-uc.a.run.app")
+
 except Exception as e:
-    print(f"⚠️  Could not load PDF vector store: {e}")
-
-# Load website vector store
-website_vector_store = None
-try:
-    if os.path.exists(os.path.join(config.WEBSITE_VECTOR_STORE_PATH, "index.faiss")):
-        website_vector_store = FAISS.load_local(
-            config.WEBSITE_VECTOR_STORE_PATH,
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
-        print(f"✓ Website vector store loaded from {config.WEBSITE_VECTOR_STORE_PATH}")
-    else:
-        print(f"ℹ️  Website vector store not found at {config.WEBSITE_VECTOR_STORE_PATH}")
-        print("   Run 'python -m agent.website_indexer' to create it.")
-except Exception as e:
-    print(f"⚠️  Could not load website vector store: {e}")
-
-# Ensure at least one store is available
-if not pdf_vector_store and not website_vector_store:
-    print("❌ FATAL: No vector stores available!")
-    print("Please run 'python -m agent.pdf_indexer' to create the PDF vector store.")
-    raise RuntimeError("No vector stores available")
-
-# Keep backward compatibility
-vector_store = pdf_vector_store if pdf_vector_store else website_vector_store
+    print(f"❌ Could not initialize BigQuery Vector Store: {e}")
+    print("   Ensure BigQuery dataset exists and credentials are configured")
+    raise RuntimeError(f"BigQuery Vector Store initialization failed: {e}")
 
 print("\n[6/6] Initializing Vertex AI for Veo 3.1...")
 try:
@@ -610,53 +594,41 @@ def ask_document(question: str, source: str = "all") -> str:
     
     print(f"[Document Query] Question: {question}")
     print(f"[Document Query] Source filter: {source}")
-    
-    try:
-        stores_to_search = []
-        
-        if source.lower() in ["all", "pdf"] and pdf_vector_store:
-            stores_to_search.append(("pdf", pdf_vector_store))
-        
-        if source.lower() in ["all", "website"] and website_vector_store:
-            stores_to_search.append(("website", website_vector_store))
-        
-        if not stores_to_search:
-            return f"No vector stores available for source: {source}"
-        
-        # Search all relevant stores with MORE results
-        search_start = time.time()
-        all_docs = []
-        
-        for source_name, store in stores_to_search:
-            # Use MMR (Maximal Marginal Relevance) for better diversity and relevance
-            try:
-                # Try MMR first for better diverse results
-                docs = store.max_marginal_relevance_search(
-                    question,
-                    k=7,           # Get 7 documents
-                    fetch_k=20,    # From pool of 20 candidates
-                    lambda_mult=0.7  # Balance relevance (0.7) vs diversity (0.3)
-                )
-            except:
-                # Fallback to regular similarity search
-                docs = store.similarity_search(question, k=7)
 
-            # Add source info and score to metadata
-            for i, doc in enumerate(docs):
-                doc.metadata['search_source'] = source_name
-                doc.metadata['rank'] = i  # Track original ranking
-            all_docs.extend(docs)
-        
+    try:
+        # Determine source type filter
+        source_type_filter = None
+        if source.lower() == "pdf":
+            source_type_filter = "pdf"
+        elif source.lower() == "website":
+            source_type_filter = "website"
+        # "all" or any other value will search all types
+
+        # Create query embedding
+        search_start = time.time()
+        print(f"Creating embedding for query...")
+        query_embedding = embeddings.embed_query(question)
+
+        # Search BigQuery vector store
+        print(f"Searching BigQuery for similar documents...")
+        results = bigquery_vector_store.search_similar(
+            query_embedding=query_embedding,
+            source_type=source_type_filter,
+            top_k=10,  # Get top 10 results
+            min_similarity=0.5  # Minimum similarity threshold
+        )
+
         search_time = time.time() - search_start
-        
+
         # Debug: Print what was found
-        print(f"\n🔍 Found {len(all_docs)} total chunks")
-        for i, doc in enumerate(all_docs[:3]):
+        print(f"\n🔍 Found {len(results)} relevant chunks from BigQuery")
+        for i, result in enumerate(results[:3]):
             print(f"\nTop result {i+1}:")
-            print(f"  Source: {doc.metadata.get('source', 'unknown')}")
-            print(f"  Preview: {doc.page_content[:150]}...")
-        
-        if not all_docs:
+            print(f"  Source: {result['source_type']}")
+            print(f"  Similarity: {result['similarity']:.3f}")
+            print(f"  Preview: {result['content'][:150]}...")
+
+        if not results:
             total_time = time.time() - start_time
             log_performance_metric(
                 user='SYSTEM',
@@ -667,19 +639,21 @@ def ask_document(question: str, source: str = "all") -> str:
                 status='NO_RESULTS'
             )
             return "I couldn't find any relevant information to answer that question."
-        
-        # Take top 10 results for better coverage and complete answers
-        all_docs = all_docs[:10]
-        
+
         # Build context with source attribution
         context_parts = []
-        for i, doc in enumerate(all_docs):
-            source_type = doc.metadata.get('search_source', 'unknown')
-            source_info = doc.metadata.get('source', 'unknown')
-            title = doc.metadata.get('title', '')
-            
+        for i, result in enumerate(results):
+            source_type = result['source_type']
+            source_name = result['source_name']
+            content = result['content']
+            similarity = result['similarity']
+            metadata = result.get('metadata', {})
+
+            # Get title from metadata
+            title = metadata.get('title', '') or metadata.get('table_name', '') or source_name
+
             context_parts.append(
-                f"Context {i+1} [from {source_type} - {title}]:\n{doc.page_content}"
+                f"Context {i+1} [from {source_type} - {title}] (relevance: {similarity:.2f}):\n{content}"
             )
         
         context = "\n\n".join(context_parts)
@@ -700,12 +674,12 @@ def ask_document(question: str, source: str = "all") -> str:
             query=question,
             total_time=total_time,
             pdf_search_time=search_time + llm_time,
-            rows_returned=len(all_docs),
+            rows_returned=len(results),
             status='SUCCESS'
         )
-        
+
         print(f"⏱️  Document query completed in {total_time:.3f}s (Search: {search_time:.3f}s, LLM: {llm_time:.3f}s)")
-        print(f"📊 Used {len(all_docs)} relevant chunks")
+        print(f"📊 Used {len(results)} relevant chunks from BigQuery")
         
         return response.content
         
