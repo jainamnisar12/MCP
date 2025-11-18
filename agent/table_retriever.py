@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
 from schema_cache_manager import SchemaCache
-from bigquery_vector_store import BigQueryVectorStore
+from .bigquery_vector_store import BigQueryVectorStore
 from langchain_google_vertexai import VertexAIEmbeddings
 
 
@@ -36,11 +36,11 @@ class TableRetriever:
 
             # Verify table exists
             stats = self.vector_store.get_stats()
-            if 'table' not in stats:
-                print(f"⚠️  No table embeddings found in BigQuery. Please run table_indexer.py first.")
+            if 'table' not in stats or stats['table'] == 0:
+                print(f"⚠️  No table embeddings found in BigQuery. Please run the Cloud Function to populate embeddings.")
                 return False
 
-            print(f"✓ Found {stats['table']['count']} table embeddings in BigQuery")
+            print(f"✓ Found {stats['table']} table embeddings in BigQuery")
             return True
 
         except Exception as e:

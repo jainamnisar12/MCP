@@ -21,7 +21,7 @@ from schema_cache_manager import (
 )
 
 from table_context import ACCESS_CONTROL
-from table_retriever import TableRetriever
+from agent.table_retriever import TableRetriever
 
 # --- Configure Audit Logging ---
 audit_logger = logging.getLogger('mcp_security_audit')
@@ -247,20 +247,24 @@ for table_name in schema_info.keys():
     print(f"  • {table_name}: {len(schema_info[table_name]['fields'])} columns")
 print("="*60 + "\n")
 
-# --- Load Vector Store ---
+# --- Load Vector Store (Optional - PDFs now in BigQuery) ---
 print("[5/5] Loading vector store for PDF queries...")
+vector_store = None
 try:
-    vector_store = FAISS.load_local(
-        config.VECTOR_STORE_PATH,
-        embeddings,
-        allow_dangerous_deserialization=True
-    )
-    print(f"✓ Vector store loaded from {config.VECTOR_STORE_PATH}")
+    import os
+    if os.path.exists(os.path.join(config.VECTOR_STORE_PATH, "index.faiss")):
+        vector_store = FAISS.load_local(
+            config.VECTOR_STORE_PATH,
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
+        print(f"✓ Local PDF vector store loaded from {config.VECTOR_STORE_PATH}")
+    else:
+        print(f"ℹ️  Local PDF vector store not found - using BigQuery for all document queries")
+        print(f"   All embeddings (PDFs, tables, websites) are now in BigQuery")
 except Exception as e:
-    print(f"❌ FATAL: Could not load vector store from {config.VECTOR_STORE_PATH}")
-    print(f"Error: {str(e)}")
-    print("Please run 'python -m agent.pdf_indexer' first to create the vector store.")
-    raise
+    print(f"⚠️  Could not load local PDF vector store: {str(e)}")
+    print(f"   Using BigQuery for all document queries instead")
 
 print("\n" + "="*60)
 print("✅ ALL RESOURCES INITIALIZED SUCCESSFULLY (VERTEX AI)")
@@ -289,17 +293,34 @@ pdf_generation_chain = pdf_prompt | llm
 def ask_upi_document(question: str) -> str:
     """
     Answers questions about the UPI (Unified Payments Interface) process
-    by searching a dedicated PDF document. Use this for questions about
+    by searching PDF documents in BigQuery. Use this for questions about
     how UPI works, its features, security, limits, or history.
     """
     start_time = time.time()
-    
+
     print(f"[PDF Tool] Received query: {question}")
-    
+
     try:
         # Track vector search time
         search_start = time.time()
-        docs = vector_store.similarity_search(question, k=3)
+
+        # Use BigQuery if local vector store is not available
+        if vector_store is None:
+            # Query BigQuery for PDF embeddings
+            from .bigquery_vector_store import BigQueryVectorStore
+            bq_vector_store = BigQueryVectorStore(dataset_name=config.BIGQUERY_DATASET)
+            query_embedding = embeddings.embed_query(question)
+            results = bq_vector_store.search_similar(
+                query_embedding=query_embedding,
+                source_type="pdf",
+                top_k=3,
+                min_similarity=0.5
+            )
+            docs = [type('Doc', (), {'page_content': r['content']}) for r in results]
+        else:
+            # Use local FAISS vector store
+            docs = vector_store.similarity_search(question, k=3)
+
         search_time = time.time() - search_start
         
         if not docs:

@@ -93,7 +93,8 @@ def refresh_schema(request):
         print(f"✅ SCHEMA REFRESH COMPLETED SUCCESSFULLY")
         print(f"{'='*60}")
         print(f"Duration: {duration:.2f} seconds")
-        print(f"Tables refreshed: {len(schema_info)}")
+        tables_count = results['steps'].get('indexing', {}).get('tables_indexed', 0)
+        print(f"Tables refreshed: {tables_count}")
         print(f"{'='*60}\n")
 
         return results, 200
