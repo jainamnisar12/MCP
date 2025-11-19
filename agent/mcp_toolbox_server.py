@@ -27,7 +27,6 @@ from schema_cache_manager import (
     SchemaCache
 )
 
-from table_context import ACCESS_CONTROL
 
 # --- Configure Audit Logging ---
 audit_logger = logging.getLogger('mcp_security_audit')
