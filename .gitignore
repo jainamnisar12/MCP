@@ -1,8 +1,9 @@
 .env
 keys
 agent/__pycache__
-data/
-data1
+data*
 schema_cache
 __pycache__
 mcp_security_audit.loglogs/
+*.log
+veo-video-service-key.json
