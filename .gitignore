@@ -7,3 +7,4 @@ __pycache__
 mcp_security_audit.loglogs/
 *.log
 veo-video-service-key.json
+mindgate
