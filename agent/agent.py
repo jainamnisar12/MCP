@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Dict, Any, Optional
 from collections import defaultdict
@@ -21,6 +22,7 @@ from customer_auth import CustomerAuthenticator
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
+from google.genai import types
 
 # --- Performance Metrics Classes ---
 perf_logger = logging.getLogger('agent_performance')
@@ -35,14 +37,20 @@ perf_logger.addHandler(perf_handler)
 @dataclass
 class PerformanceMetrics:
     """Store performance metrics for a single request"""
+    query_id: str  # Unique identifier to correlate with MCP tool logs
     timestamp: str
     user: str
     user_type: str
     query: str
 
-    # Timing metrics (in seconds)
-    total_time: float = 0.0
-    agent_response_time: Optional[float] = None
+    # End-to-end timing metrics (in seconds)
+    total_conversation_time: float = 0.0  # Complete time from user input to final response
+    agent_processing_time: Optional[float] = None  # Agent internal processing time
+    tool_execution_time: Optional[float] = None  # Time spent executing tools (MCP)
+    
+    # Additional metrics
+    tools_used: list = None  # List of tools that were called
+    response_tokens: Optional[int] = None  # Number of tokens in response
 
     # Status
     status: str = "SUCCESS"
@@ -75,7 +83,7 @@ class PerformanceTracker:
         # Update session stats
         user_stats = self.session_stats[metric.user]
         user_stats['total_queries'] += 1
-        user_stats['total_time'] += metric.total_time
+        user_stats['total_time'] += metric.total_conversation_time
         user_stats['avg_time'] = user_stats['total_time'] / user_stats['total_queries']
         
         if metric.status == "ERROR":
@@ -92,8 +100,8 @@ class PerformanceTracker:
         user_metrics = [m for m in self.metrics_history if m.user == user]
         
         if user_metrics:
-            stats['min_response_time'] = min(m.total_time for m in user_metrics)
-            stats['max_response_time'] = max(m.total_time for m in user_metrics)
+            stats['min_response_time'] = min(m.total_conversation_time for m in user_metrics)
+            stats['max_response_time'] = max(m.total_conversation_time for m in user_metrics)
         
         return stats
     
@@ -507,14 +515,19 @@ if __name__ == "__main__":
             print("Assistant: ", end="", flush=True)
             
             # Start performance tracking
-            query_start_time = time.time()
+            conversation_start_time = time.time()
+            query_id = str(uuid.uuid4())[:8]  # Short unique ID for correlation
             
             metric = PerformanceMetrics(
+                query_id=query_id,
                 timestamp=datetime.now().isoformat(),
                 user=CURRENT_USER,
                 user_type=USER_TYPE,
-                query=user_input[:200]  # Truncate long queries for logging
+                query=user_input[:200],  # Truncate long queries for logging
+                tools_used=[]
             )
+            
+            print(f"🔍 Query ID: {query_id}")  # Display for correlation
             
             # Run the agent with the user's query
             try:
@@ -523,6 +536,7 @@ if __name__ == "__main__":
                 # Helper to collect async generator results
                 async def collect_response():
                     chunks = []
+                    tool_calls_detected = False
                     async for event in runner.run_async(
                         user_id=CURRENT_USER,
                         session_id=USER_SESSION_ID,
@@ -533,6 +547,15 @@ if __name__ == "__main__":
                             chunk_str = event.content.text
                             chunks.append(chunk_str)
                             print(chunk_str, end='', flush=True)
+                            
+                        # Detect tool usage (this is approximate, actual tool detection would need deeper integration)
+                        if hasattr(event, 'content'):
+                            content_str = str(event.content).lower()
+                            if 'query_customer_database' in content_str and 'query_customer_database' not in metric.tools_used:
+                                metric.tools_used.append('query_customer_database')
+                            if 'query_pdf_documents' in content_str and 'query_pdf_documents' not in metric.tools_used:
+                                metric.tools_used.append('query_pdf_documents')
+                    
                     print()  # New line after response
                     return "".join(chunks) if chunks else "(No response)"
 
@@ -540,11 +563,14 @@ if __name__ == "__main__":
                 import asyncio
                 response = asyncio.run(collect_response())
 
-                metric.agent_response_time = time.time() - agent_start
+                metric.agent_processing_time = time.time() - agent_start
                 
-                # Calculate total time
-                metric.total_time = time.time() - query_start_time
+                # Calculate total conversation time (end-to-end)
+                metric.total_conversation_time = time.time() - conversation_start_time
                 metric.status = "SUCCESS"
+                
+                # Estimate response tokens (approximate)
+                metric.response_tokens = len(response.split()) if response else 0
                 
                 # Log the metric
                 performance_tracker.log_metric(metric)
@@ -552,8 +578,12 @@ if __name__ == "__main__":
                 # Print performance summary for this query
                 print(f"\n{'─'*60}")
                 print(f"⏱️  Performance Metrics (Query #{query_number}):")
-                print(f"   • Agent Response Time: {metric.agent_response_time:.3f}s")
-                print(f"   • Total Query Time: {metric.total_time:.3f}s")
+                print(f"   • End-to-End Time: {metric.total_conversation_time:.3f}s")
+                print(f"   • Agent Processing: {metric.agent_processing_time:.3f}s")
+                if metric.tools_used:
+                    print(f"   • Tools Used: {', '.join(metric.tools_used)}")
+                if metric.response_tokens:
+                    print(f"   • Response Tokens: {metric.response_tokens}")
                 
                 # Get current session stats
                 stats = performance_tracker.get_session_summary(CURRENT_USER)
@@ -561,7 +591,7 @@ if __name__ == "__main__":
                 print(f"{'─'*60}\n")
                 
             except Exception as agent_error:
-                metric.total_time = time.time() - query_start_time
+                metric.total_conversation_time = time.time() - conversation_start_time
                 metric.status = "ERROR"
                 metric.error_message = str(agent_error)[:200]
                 

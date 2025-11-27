@@ -1,3 +1,8 @@
+import sys
+import os
+# Add parent directory to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import config
 import uvicorn
 import pandas as pd
@@ -20,8 +25,25 @@ from schema_cache_manager import (
     SchemaCache
 )
 
+# No additional imports for performance optimization
+
 from table_context import ACCESS_CONTROL
-from agent.table_retriever import TableRetriever
+
+# Import TableRetriever with proper path handling
+try:
+    # Try importing from current directory first
+    from table_retriever import TableRetriever
+except ImportError:
+    try:
+        # Try importing from agent directory
+        import sys
+        import os
+        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+        from table_retriever import TableRetriever
+    except ImportError:
+        # If all fails, set TableRetriever to None and continue without it
+        print("⚠️  Warning: Could not import TableRetriever. RAG functionality will be disabled.")
+        TableRetriever = None
 
 # --- Configure Audit Logging ---
 audit_logger = logging.getLogger('mcp_security_audit')
@@ -83,10 +105,12 @@ def log_performance_metric(
     pdf_search_time: float = None,
     rows_returned: int = None,
     bytes_processed: int = None,
-    status: str = "SUCCESS"
+    status: str = "SUCCESS",
+    query_id: str = None
 ):
     """Log performance metrics for MCP tool calls"""
     metric = {
+        'query_id': query_id,  # For correlation with agent logs
         'timestamp': datetime.now().isoformat(),
         'user': user,
         'user_type': user_type,
@@ -185,11 +209,11 @@ llm = ChatVertexAI(
     model_name="gemini-2.5-flash",
     project=config.GCP_PROJECT_ID,
     location=config.GCP_LOCATION,
-    temperature=0,
+    temperature=0
 )
 
 embeddings = VertexAIEmbeddings(
-    model_name="text-embedding-004",
+    model_name="gemini-embedding-001",
     project=config.GCP_PROJECT_ID,
     location=config.GCP_LOCATION,
 )
@@ -225,13 +249,17 @@ except Exception as e:
 # --- Initialize Table Retriever for RAG ---
 print("\n[4/5] Initializing Table RAG Retriever...")
 try:
-    table_retriever = TableRetriever()
-    rag_initialized = table_retriever.initialize()
+    if TableRetriever is not None:
+        table_retriever = TableRetriever()
+        rag_initialized = table_retriever.initialize()
 
-    if rag_initialized:
-        print("✓ Table RAG retriever initialized successfully")
+        if rag_initialized:
+            print("✓ Table RAG retriever initialized successfully")
+        else:
+            print("⚠️  Table RAG retriever not available - using fallback (all tables)")
+            table_retriever = None
     else:
-        print("⚠️  Table RAG retriever not available - using fallback (all tables)")
+        print("⚠️  TableRetriever not available - using fallback (all tables)")
         table_retriever = None
 except Exception as e:
     print(f"⚠️  Could not initialize table retriever: {e}")
@@ -305,21 +333,64 @@ def ask_upi_document(question: str) -> str:
         search_start = time.time()
 
         # Use BigQuery if local vector store is not available
+        docs = []
+        source_info = []
+        
         if vector_store is None:
-            # Query BigQuery for PDF embeddings
-            from .bigquery_vector_store import BigQueryVectorStore
-            bq_vector_store = BigQueryVectorStore(dataset_name=config.BIGQUERY_DATASET)
-            query_embedding = embeddings.embed_query(question)
-            results = bq_vector_store.search_similar(
-                query_embedding=query_embedding,
-                source_type="pdf",
-                top_k=3,
-                min_similarity=0.5
-            )
-            docs = [type('Doc', (), {'page_content': r['content']}) for r in results]
+            # Query BigQuery for PDF embeddings from new table
+            try:
+                # Import the new vector store class
+                sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                from index_new_pdf import NewBigQueryVectorStore
+                print(f"📚 New BigQuery vector store imported successfully")
+                bq_vector_store = NewBigQueryVectorStore(dataset_name=config.BIGQUERY_DATASET)
+                
+                # Create query embedding with detailed logging
+                print(f"🧠 Creating embedding for query: '{question}'")
+                print(f"🔧 Using embedding model: {embeddings.model_name}")
+                query_embedding = embeddings.embed_query(question)
+                print(f"� Query embedding dimensions: {len(query_embedding)}")
+                print(f"📊 Query embedding (first 5 values): {query_embedding[:5]}")
+                
+                print(f"�🔍 Searching new BigQuery table for PDF embeddings with similarity threshold: 0.3")
+                results = bq_vector_store.similarity_search(
+                    query_embedding=query_embedding,
+                    k=3,
+                    similarity_threshold=0.3
+                )
+                
+                print(f"📊 BigQuery returned {len(results)} results")
+                
+                # Log detailed results
+                for i, result in enumerate(results):
+                    print(f"📄 Result {i+1}:")
+                    print(f"   • Source: {result.get('source_name', 'Unknown')}")
+                    print(f"   • Similarity: {result.get('similarity_score', 0):.4f}")
+                    print(f"   • Content preview: {result.get('content', '')[:150]}...")
+                    print(f"   • Content length: {len(result.get('content', ''))} chars")
+                
+                docs = [type('Doc', (), {'page_content': r['content']}) for r in results]
+                # Store source information for later reference
+                source_info = [(r.get('source_name', 'UPI Document'), r.get('similarity_score', 0), r['content']) for r in results]
+                print(f"📝 Created source_info with {len(source_info)} entries")
+            except ImportError as e:
+                print(f"⚠️  New BigQuery vector store import failed: {e}")
+                import traceback
+                traceback.print_exc()
+                docs = []
+                source_info = []
+            except Exception as e:
+                print(f"⚠️  New BigQuery vector store search failed: {e}")
+                print(f"🔍 Error details: {type(e).__name__}: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                docs = []
+                source_info = []
         else:
             # Use local FAISS vector store
             docs = vector_store.similarity_search(question, k=3)
+            # For local vector store, create basic source info
+            source_info = [(getattr(doc, 'metadata', {}).get('source', 'PDF Document'), 0.0, doc.page_content) for doc in docs]
 
         search_time = time.time() - search_start
         
@@ -333,8 +404,9 @@ def ask_upi_document(question: str) -> str:
                 pdf_search_time=search_time,
                 status='NO_RESULTS'
             )
-            return "I couldn't find any relevant information in the document to answer that question."
+            return "[ANSWER]\nI couldn't find any relevant information in the document to answer that question.\n\n[SOURCES AND EXACT TEXT]\nNo relevant sources found."
         
+        print(f"📄 Processing {len(docs)} documents with {len(source_info)} source entries")
         context = "\n\n".join([f"Context {i+1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
         
         # Track LLM response time
@@ -359,7 +431,40 @@ def ask_upi_document(question: str) -> str:
         
         print(f"⏱️  PDF Query completed in {total_time:.3f}s (Search: {search_time:.3f}s, LLM: {llm_time:.3f}s)")
         
-        return response.content
+        # Build enhanced response with sources and exact text
+        enhanced_response = []
+        enhanced_response.append("[ANSWER]")
+        enhanced_response.append(response.content)
+        enhanced_response.append("")
+        enhanced_response.append("[SOURCES AND EXACT TEXT]")
+        enhanced_response.append("")
+        
+        if source_info and len(source_info) > 0:
+            print(f"📝 Including {len(source_info)} sources in response")
+            for i, (source, similarity, exact_text) in enumerate(source_info, 1):
+                enhanced_response.append(f"**Source {i}: {source}**")
+                if similarity > 0:
+                    enhanced_response.append(f"Similarity Score: {similarity:.3f}")
+                enhanced_response.append("")
+                enhanced_response.append("Exact Text:")
+                enhanced_response.append(f'"{exact_text[:500]}..."' if len(exact_text) > 500 else f'"{exact_text}"')
+                enhanced_response.append("")
+                enhanced_response.append("-" * 50)
+                enhanced_response.append("")
+        else:
+            print(f"⚠️  No source_info available, using document content as fallback")
+            # Fallback: use the document content directly
+            for i, doc in enumerate(docs, 1):
+                enhanced_response.append(f"**Source {i}: PDF Document**")
+                enhanced_response.append("")
+                enhanced_response.append("Exact Text:")
+                content = doc.page_content
+                enhanced_response.append(f'"{content[:500]}..."' if len(content) > 500 else f'"{content}"')
+                enhanced_response.append("")
+                enhanced_response.append("-" * 50)
+                enhanced_response.append("")
+        
+        return "\n".join(enhanced_response)
         
     except Exception as e:
         total_time = time.time() - start_time
@@ -414,7 +519,7 @@ def validate_query_type(sql_query: str) -> Tuple[bool, str]:
         return False, (
             "🚫 SECURITY BLOCK: Only SELECT queries are permitted.\n"
             "   This chatbot has READ-ONLY access to the database.\n"
-            "   This incident has been logged for audit purposes."
+            "   This incident has been logged for audit and compliance."
         )
     
     return True, ""
@@ -823,8 +928,10 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     rag_retrieval_time = time.time() - rag_retrieval_start
     print(f"⏱️  Table RAG Retrieval: {rag_retrieval_time:.3f}s")
 
-    # 5. Generate SQL with timing (using retrieved schema)
+    # 5. Generate SQL with LLM
     sql_gen_start = time.time()
+    
+    # Generate SQL with LLM (using retrieved schema)
     sql_response = sql_generation_chain.invoke({
         "question": natural_language_query,
         "current_user": f"'{current_user}'",
@@ -872,8 +979,11 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
         )
         return "I'm sorry, but I cannot answer that question with the available database schema."
 
-    sql_upper = sql_query.upper().replace("```SQL", "").replace("```", "").strip()
-    if not (sql_upper.startswith('SELECT') or sql_upper.startswith('WITH')):
+    # Clean SQL query
+    sql_query = sql_query.replace("```SQL", "").replace("```", "").strip()
+    
+    sql_upper = sql_query.upper()
+    if not (sql_upper.startswith('SELECT') or sql_upper.startswith('WITH') or sql_upper.startswith('/*')):
         total_time = time.time() - tool_start_time
         log_performance_metric(
             user=current_user,
@@ -908,6 +1018,7 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
         status='SUCCESS' if df_result is not None else 'ERROR'
     )
     
+
     # Log audit
     if df_result is not None:
         log_query_attempt(
@@ -996,3 +1107,7 @@ if __name__ == "__main__":
         port=8001,
         path="/sse"           
     )
+
+# Performance monitoring tools removed
+
+# Performance optimizations removed
