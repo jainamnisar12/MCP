@@ -189,7 +189,10 @@ def fetch_bigquery_schema(client: bigquery.Client, dataset_name: str) -> Dict[st
                 "fields": schema_fields,
                 "num_rows": table.num_rows,
                 "created": str(table.created),
-                "modified": str(table.modified)
+                "modified": str(table.modified),
+                "time_partitioning": str(table.time_partitioning.type_) if table.time_partitioning else None,
+                "time_partitioning_field": str(table.time_partitioning.field) if table.time_partitioning and table.time_partitioning.field else None,
+                "range_partitioning": str(table.range_partitioning.field) if table.range_partitioning else None
             }
             
             print(f"     ✓ {len(schema_fields)} columns, {table.num_rows} rows")
@@ -493,6 +496,13 @@ def format_schema_for_llm(schema_info: Dict, table_contexts: Dict) -> str:
         
         if context.get("sensitive"):
             schema_parts.append(f"🔒 Sensitive Data: Yes - Row-level security enforced")
+        
+        # Add Partitioning Info
+        if info.get("time_partitioning"):
+            field = info.get("time_partitioning_field", "_PARTITIONDATE")
+            schema_parts.append(f"⚡ PARTITIONED BY: {field} ({info['time_partitioning']})")
+        elif info.get("range_partitioning"):
+            schema_parts.append(f"⚡ PARTITIONED BY: {info['range_partitioning']} (Range)")
         
         schema_parts.append("\n📋 Columns:")
         

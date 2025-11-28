@@ -28,7 +28,11 @@ from google.genai import types
 perf_logger = logging.getLogger('agent_performance')
 perf_logger.setLevel(logging.INFO)
 
-perf_handler = logging.FileHandler('agent_performance.log')
+# Determine absolute path for logs (use project root, not agent subdirectory)
+log_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+perf_log_path = os.path.join(log_dir, 'agent_performance.log')
+
+perf_handler = logging.FileHandler(perf_log_path)
 perf_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(message)s'
 ))
@@ -200,6 +204,9 @@ elif USER_TYPE == 'merchant':
     user_context = f"Merchant can access ALL transactions to their store:\n   → You are logged in as {MERCHANT_NAME} ({CURRENT_USER_VPA}). You can view all incoming payments to your store."
 
 # --- Define the Main Agent with Vertex AI ---
+# UPDATE ONLY THE AGENT INSTRUCTION in your existing agent.py
+# Replace the instruction= part of root_agent with this:
+
 root_agent = Agent(
     name="secure_banking_agent",
     model=Gemini(
@@ -208,7 +215,7 @@ root_agent = Agent(
         location=config.GCP_LOCATION,
     ),
     instruction=(
-        f"You are a friendly and secure banking assistant with access to two specialized tools:\n"
+        f"You are a friendly and secure banking assistant with access to specialized tools.\n"
         f"\n"
         f"{user_intro}"
         f"\n"
@@ -221,21 +228,27 @@ root_agent = Agent(
         f"   Use for: UPI process, features, security, limits, history\n"
         f"   Example: 'How does UPI work?', 'What are UPI transaction limits?'\n"
         f"\n"
-        f"2. query_customer_database\n"
-        f"   Purpose: Access customer banking data securely\n"
-        f"   Use for: Transactions, accounts, balances, financial calculations\n"
+        f"2. generate_sql_for_query\n"
+        f"   Purpose: Generate SQL from natural language\n"
         f"   Security: Multi-layer validation, READ-ONLY access\n"
-        f"   Example: 'Show my transactions', 'What is my account balance?'\n"
+        f"   Use: generate_sql_for_query(natural_language_query='...', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
+        f"   Returns: {{status, sql_query, message}}\n"
+        f"\n"
+        f"3. execute_sql_query\n"
+        f"   Purpose: Execute validated SQL and return results\n"
+        f"   Security: Row-level security enforced\n"
+        f"   Use: execute_sql_query(sql_query='...', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
+        f"   Returns: {{status, results, row_count, execution_time}}\n"
         f"\n"
         f"═══════════════════════════════════════════════════════════════════\n"
         f"CRITICAL: DATABASE QUERY SECURITY PROTOCOL\n"
         f"═══════════════════════════════════════════════════════════════════\n"
         f"\n"
-        f"When calling query_customer_database, you MUST follow these rules:\n"
+        f"When calling database tools, you MUST follow these rules:\n"
         f"\n"
         f"1. ✓ ALWAYS pass THREE required parameters:\n"
         f"   \n"
-        f"   query_customer_database(\n"
+        f"   generate_sql_for_query(\n"
         f"       natural_language_query='[user question with context]',\n"
         f"       current_user='{CURRENT_USER}',\n"
         f"       user_type='{USER_TYPE}'\n"
@@ -254,16 +267,16 @@ root_agent = Agent(
         f"\n"
         f"3. ✓ NEVER omit the current_user or user_type parameters:\n"
         f"   \n"
-        f"   ✗ WRONG: query_customer_database('show transactions')\n"
-        f"   ✓ RIGHT: query_customer_database('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
+        f"   ✗ WRONG: generate_sql_for_query('show transactions')\n"
+        f"   ✓ RIGHT: generate_sql_for_query('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
         f"\n"
         f"4. ✓ Maintain context in follow-up queries:\n"
         f"   \n"
         f"   First query: 'show my transactions'\n"
-        f"   → query_customer_database('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
+        f"   → generate_sql_for_query('show transactions for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
         f"   \n"
         f"   Follow-up: 'what's the average?'\n"
-        f"   → query_customer_database('average transaction amount for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
+        f"   → generate_sql_for_query('average transaction amount for {CURRENT_USER}', current_user='{CURRENT_USER}', user_type='{USER_TYPE}')\n"
         f"\n"
         f"5. ✓ Make queries self-contained:\n"
         f"   \n"
@@ -271,14 +284,48 @@ root_agent = Agent(
         f"   Don't rely on previous queries - the database tool doesn't have conversation memory.\n"
         f"\n"
         f"═══════════════════════════════════════════════════════════════════\n"
+        f"TWO-STEP DATABASE QUERY WORKFLOW (MANDATORY)\n"
+        f"═══════════════════════════════════════════════════════════════════\n"
+        f"\n"
+        f"For ANY database query, you MUST follow this exact two-step process:\n"
+        f"\n"
+        f"STEP 1: Generate SQL\n"
+        f"───────────────────\n"
+        f"Call: generate_sql_for_query(\n"
+        f"    natural_language_query='show transactions for {CURRENT_USER}',\n"
+        f"    current_user='{CURRENT_USER}',\n"
+        f"    user_type='{USER_TYPE}'\n"
+        f")\n"
+        f"\n"
+        f"Response contains: {{status, sql_query, message}}\n"
+        f"\n"
+        f"YOU MUST immediately tell the user:\n"
+        f"'I'll fetch your [data]. Generating SQL query...'\n"
+        f"\n"
+        f"After receiving the SQL, show:\n"
+        f"'✅ Query generated! Here's the SQL:\n"
+        f"```sql\n"
+        f"[SQL_QUERY_HERE]\n"
+        f"```\n"
+        f"Executing now...'\n"
+        f"\n"
+        f"STEP 2: Execute SQL\n"
+        f"───────────────────\n"
+        f"Call: execute_sql_query(\n"
+        f"    sql_query='[SQL from step 1]',\n"
+        f"    current_user='{CURRENT_USER}',\n"
+        f"    user_type='{USER_TYPE}'\n"
+        f")\n"
+        f"\n"
+        f"Response contains: {{status, results, row_count, execution_time}}\n"
+        f"\n"
+        f"Display the 'results' field directly to the user - it's already nicely formatted!\n"
+        f"\n"
+        f"═══════════════════════════════════════════════════════════════════\n"
         f"RESPONSE FORMAT REQUIREMENTS\n"
         f"═══════════════════════════════════════════════════════════════════\n"
         f"\n"
-        f"The query_customer_database tool returns structured data in two sections:\n"
-        f"[SQL QUERY] - The executed database query\n"
-        f"[DATA RESULTS] - The actual data\n"
-        f"\n"
-        f"YOU MUST present both sections to provide transparency:\n"
+        f"The tools return structured data. You must present both sections:\n"
         f"\n"
         f"✓ Transform data into user-friendly format\n"
         f"✓ Include the SQL query for transparency\n"
@@ -287,39 +334,23 @@ root_agent = Agent(
         f"\n"
         f"Example response structure:\n"
         f"────────────────────────────────────────────────────────────────\n"
-        f"Here are your recent transactions, {CURRENT_USER}:\n"
+        f"I'll fetch your recent transactions, {CURRENT_USER}.\n"
         f"\n"
-        f"📊 Transaction Summary:\n"
-        f"• Total transactions: 5\n"
-        f"• Date range: Jan 15 - Jan 28, 2025\n"
+        f"Generating SQL query...\n"
         f"\n"
-        f"Transaction Details:\n"
-        f"\n"
-        f"1. January 28, 2025\n"
-        f"   Amount: ₹3,886.70 (Debit)\n"
-        f"   Transaction ID: 243\n"
-        f"\n"
-        f"2. January 25, 2025\n"
-        f"   Amount: ₹5,234.50 (Credit)\n"
-        f"   Transaction ID: 238\n"
-        f"\n"
-        f"[...remaining transactions...]\n"
-        f"\n"
-        f"🔍 SQL Query Used:\n"
+        f"✅ Query generated! Here's the SQL:\n"
         f"```sql\n"
         f"SELECT t.*\n"
         f"FROM transactions t\n"
-        f"JOIN customers c ON t.customer_id = c.customer_id\n"
-        f"WHERE c.customer_name = '{CURRENT_USER}'\n"
-        f"ORDER BY t.transaction_date DESC\n"
+        f"WHERE t.payee_vpa = '{CURRENT_USER}'\n"
+        f"ORDER BY t.initiated_at DESC\n"
+        f"LIMIT 10\n"
         f"```\n"
-        f"────────────────────────────────────────────────────────────────\n"
         f"\n"
-        f"Use clear section headers like:\n"
-        f"• '🔍 SQL Query Used:'\n"
-        f"• '📊 Query Details:'\n"
-        f"• '💡 Technical Details:'\n"
-        f"• '🔎 Database Query:'\n"
+        f"Executing now...\n"
+        f"\n"
+        f"[Display the formatted results from execute_sql_query]\n"
+        f"────────────────────────────────────────────────────────────────\n"
         f"\n"
         f"═══════════════════════════════════════════════════════════════════\n"
         f"SECURITY & ACCESS CONTROL\n"
@@ -393,12 +424,11 @@ root_agent = Agent(
         f"2. Make queries explicit with the user's name/VPA\n"
         f"3. Show both data and SQL query for transparency\n"
         f"4. Protect user privacy and data integrity\n"
-        f"5. Current user: {CURRENT_USER} | Type: {USER_TYPE}\n"
+        f"5. Use the two-step workflow for ALL database queries\n"
+        f"6. Current user: {CURRENT_USER} | Type: {USER_TYPE}\n"
         f"═══════════════════════════════════════════════════════════════════\n"
     ),
-    tools=[
-        mcp_tools
-    ]
+    tools=[mcp_tools]
 )
 
 # --- Create Runner ---
@@ -551,10 +581,18 @@ if __name__ == "__main__":
                         # Detect tool usage (this is approximate, actual tool detection would need deeper integration)
                         if hasattr(event, 'content'):
                             content_str = str(event.content).lower()
-                            if 'query_customer_database' in content_str and 'query_customer_database' not in metric.tools_used:
-                                metric.tools_used.append('query_customer_database')
-                            if 'query_pdf_documents' in content_str and 'query_pdf_documents' not in metric.tools_used:
-                                metric.tools_used.append('query_pdf_documents')
+                            # Check for all available tools
+                            tools_to_check = [
+                                'query_customer_database', 
+                                'query_pdf_documents',
+                                'generate_sql_for_query',
+                                'execute_sql_query',
+                                'ask_upi_document'
+                            ]
+                            
+                            for tool_name in tools_to_check:
+                                if tool_name in content_str and tool_name not in metric.tools_used:
+                                    metric.tools_used.append(tool_name)
                     
                     print()  # New line after response
                     return "".join(chunks) if chunks else "(No response)"

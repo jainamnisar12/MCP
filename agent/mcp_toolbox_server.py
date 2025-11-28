@@ -49,8 +49,12 @@ except ImportError:
 audit_logger = logging.getLogger('mcp_security_audit')
 audit_logger.setLevel(logging.INFO)
 
+# Determine absolute path for logs (use project root, not agent subdirectory)
+log_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+audit_log_path = os.path.join(log_dir, 'mcp_security_audit.log')
+
 # File handler for audit trail
-audit_handler = logging.FileHandler('mcp_security_audit.log')
+audit_handler = logging.FileHandler(audit_log_path)
 audit_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(levelname)s | %(message)s'
 ))
@@ -68,11 +72,16 @@ audit_logger.addHandler(console_handler)
 perf_logger = logging.getLogger('mcp_performance')
 perf_logger.setLevel(logging.INFO)
 
-perf_handler = logging.FileHandler('mcp_performance.log')
+# Determine absolute path for logs (use project root, not agent subdirectory)
+perf_log_path = os.path.join(log_dir, 'mcp_performance.log')
+
+perf_handler = logging.FileHandler(perf_log_path)
 perf_handler.setFormatter(logging.Formatter(
     '%(asctime)s | %(message)s'
 ))
 perf_logger.addHandler(perf_handler)
+
+print(f"📝 Performance logs will be written to: {perf_log_path}")
 
 def log_query_attempt(
     user: str,
@@ -619,6 +628,13 @@ sql_prompt = ChatPromptTemplate.from_messages([
     - The upi_transaction table contains all transaction data (55,000+ rows)
     - The old tables are empty and deprecated
 
+    **PARTITIONING & PERFORMANCE (CRITICAL)**:
+    - CHECK THE SCHEMA for tables marked with `⚡ PARTITIONED BY`.
+    - **YOU MUST ALWAYS FILTER BY THE PARTITION COLUMN** for these tables.
+    - If the user does NOT specify a date range for a partitioned table, **DEFAULT TO THE LAST 30 DAYS**.
+    - Example: `WHERE initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)`
+    - Never scan a partitioned table without a filter on the partition column.
+
     **CRITICAL SECURITY RULES**:
     - Current user context: {{current_user}}
     - User type: {{user_type}} (either 'customer' or 'merchant')
@@ -643,23 +659,26 @@ sql_prompt = ChatPromptTemplate.from_messages([
     - Do NOT add LIMIT clause - the system handles this automatically
 
     **Query Patterns with Security for CUSTOMERS**:
-    - "my transactions" →
+    - "my transactions" (Defaults to last 30 days) →
       SELECT t.* FROM {config.BIGQUERY_DATASET}.upi_transaction t
       JOIN {config.BIGQUERY_DATASET}.upi_customer c ON t.payer_vpa = c.primary_vpa
       WHERE c.name = {{current_user}}
+      AND t.initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
 
     - "my account details" →
       SELECT * FROM {config.BIGQUERY_DATASET}.upi_customer
       WHERE name = {{current_user}}
 
     **Query Patterns with Security for MERCHANTS**:
-    - "my transactions" or "transactions to my store" →
+    - "my transactions" or "transactions to my store" (Defaults to last 30 days) →
       SELECT t.* FROM {config.BIGQUERY_DATASET}.upi_transaction t
       WHERE t.payee_vpa = {{current_user}}
+      AND t.initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
 
-    - "total sales" or "revenue" →
+    - "total sales" or "revenue" (Defaults to last 30 days) →
       SELECT SUM(amount) as total_sales FROM {config.BIGQUERY_DATASET}.upi_transaction t
       WHERE t.payee_vpa = {{current_user}} AND t.status = 'SUCCESS'
+      AND t.initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
 
     - "my merchant details" →
       SELECT * FROM {config.BIGQUERY_DATASET}.upi_merchant
@@ -898,35 +917,10 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
             )
             return error_msg
 
-    # 4. Retrieve relevant tables using RAG (before SQL generation)
-    rag_retrieval_start = time.time()
-    relevant_schema_text = formatted_schema  # Default fallback
-
-    if table_retriever:
-        try:
-            print(f"\n[RAG] Retrieving relevant tables for query...")
-            relevant_tables = table_retriever.retrieve_relevant_tables(
-                natural_language_query,
-                k=3  # Retrieve top 3 most relevant tables
-            )
-
-            if relevant_tables:
-                table_names = [t['table_name'] for t in relevant_tables]
-                print(f"[RAG] Retrieved tables: {', '.join(table_names)}")
-
-                # Log similarity scores
-                for table in relevant_tables:
-                    print(f"      • {table['table_name']} (score: {table['similarity_score']})")
-
-                # Get schema text for only the relevant tables
-                relevant_schema_text = table_retriever.get_table_schema_text(table_names)
-            else:
-                print(f"[RAG] No relevant tables found, using all tables")
-        except Exception as e:
-            print(f"[RAG] Warning: Retrieval failed ({e}), using all tables")
-
-    rag_retrieval_time = time.time() - rag_retrieval_start
-    print(f"⏱️  Table RAG Retrieval: {rag_retrieval_time:.3f}s")
+    # 4. Use full schema (RAG removed)
+    relevant_schema_text = formatted_schema
+    print(f"[RAG] Using full schema ({len(schema_info)} tables)")
+    rag_retrieval_time = 0.0
 
     # 5. Generate SQL with LLM
     sql_gen_start = time.time()
@@ -1067,6 +1061,284 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
         response_parts.append(text_result)
     
     return "\n".join(response_parts)
+
+@mcp.tool
+async def generate_sql_for_query(
+    natural_language_query: str,
+    current_user: str = None,
+    user_type: str = 'customer'
+):
+    """
+    Step 1: Generate SQL query from natural language.
+    Validates the request and generates the SQL query.
+    """
+    tool_start_time = time.time()
+    sql_gen_time = None
+    
+    print(f"\n{'='*60}")
+    print(f"[SQL Gen] Query: {natural_language_query}")
+    print(f"[SQL Gen] User: {current_user or 'NONE'} ({user_type.upper()})")
+    print(f"{'='*60}")
+
+    # 1. Authentication check
+    if not current_user:
+        return {
+            "status": "error",
+            "message": "🚫 Access Denied: Authentication required to access customer data."
+        }
+    
+    # 2. Rate Limiting
+    is_allowed, limit_msg = rate_limiter.is_allowed(current_user)
+    if not is_allowed:
+        log_query_attempt(current_user, natural_language_query, 'BLOCKED', 'Rate limit exceeded')
+        return {
+            "status": "error",
+            "message": limit_msg
+        }
+    
+    # 3. Access permission check (customers only)
+    if user_type == 'customer':
+        is_allowed, error_msg = _check_access_permission(natural_language_query, current_user)
+        if not is_allowed:
+            log_query_attempt(current_user, natural_language_query, 'BLOCKED', 'Unauthorized access pattern')
+            return {
+                "status": "error",
+                "message": error_msg
+            }
+
+    # 4. Use full schema (RAG removed)
+    relevant_schema_text = formatted_schema
+    print(f"[RAG] Using full schema ({len(schema_info)} tables)")
+
+    # 5. Generate SQL
+    sql_gen_start = time.time()
+    
+    result = await sql_generation_chain.ainvoke({
+        "question": natural_language_query,
+        "current_user": f"'{current_user}'",
+        "user_type": user_type,
+        "formatted_schema": relevant_schema_text
+    })
+    
+    sql_query = result.content.strip() if hasattr(result, 'content') else str(result).strip()
+    sql_gen_time = time.time() - sql_gen_start
+    print(f"⏱️  SQL Generation: {sql_gen_time:.3f}s")
+
+    # Check for access denied
+    if "ACCESS_DENIED" in sql_query:
+        log_query_attempt(current_user, natural_language_query, 'BLOCKED', 'LLM detected unauthorized access')
+        log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='ACCESS_DENIED')
+        return {
+            "status": "error",
+            "message": "🚫 Access Denied: You can only query your own data."
+        }
+
+    # Validate SQL
+    if "cannot answer" in sql_query.lower():
+        log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='GENERATION_FAILED')
+        return {
+            "status": "error",
+            "message": "I'm sorry, but I cannot answer that question with the available database schema."
+        }
+
+    sql_query = sql_query.replace("```SQL", "").replace("```", "").strip()
+    sql_upper = sql_query.upper()
+    
+    if not (sql_upper.startswith('SELECT') or sql_upper.startswith('WITH') or sql_upper.startswith('/*')):
+        log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='INVALID_SQL')
+        return {
+            "status": "error",
+            "message": "I encountered an issue generating a SQL query. Please try rephrasing your question."
+        }
+
+    # Security validation
+    is_valid_type, error_msg = validate_query_type(sql_query)
+    if not is_valid_type:
+        log_query_attempt(current_user, sql_query, 'BLOCKED', 'Prohibited query type detected')
+        log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='BLOCKED_TYPE')
+        return {
+            "status": "error",
+            "message": error_msg
+        }
+
+    if current_user and user_type == 'customer':
+        is_valid, error_msg = validate_sql_access(sql_query, current_user)
+        if not is_valid:
+            log_query_attempt(current_user, sql_query, 'BLOCKED', 'Row-level security violation')
+            log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='BLOCKED_ACCESS')
+            return {
+                "status": "error",
+                "message": error_msg
+            }
+
+    total_time = time.time() - tool_start_time
+    
+    # Log performance
+    log_performance_metric(
+        user=current_user,
+        user_type=user_type,
+        query=natural_language_query,
+        total_time=total_time,
+        sql_generation_time=sql_gen_time,
+        status='SUCCESS'
+    )
+    
+    return {
+        "status": "success",
+        "sql_query": sql_query,
+        "generation_time": f"{sql_gen_time:.3f}s",
+        "message": f"✅ SQL query generated successfully in {sql_gen_time:.3f}s"
+    }
+
+
+@mcp.tool
+async def execute_sql_query(
+    sql_query: str,
+    current_user: str = None,
+    user_type: str = 'customer'
+):
+    """
+    Step 2: Execute SQL and return formatted results.
+    """
+    exec_start_time = time.time()
+    
+    print(f"\n{'='*60}")
+    print(f"[SQL Exec] Executing for: {current_user} ({user_type.upper()})")
+    print(f"{'='*60}")
+
+    if not current_user:
+        return {
+            "status": "error",
+            "message": "🚫 Authentication required"
+        }
+
+    try:
+        # Add LIMIT if not present
+        clean_sql = sql_query.strip()
+        if 'LIMIT' not in clean_sql.upper():
+            clean_sql = f"{clean_sql.rstrip(';')} LIMIT 1000"
+        
+        print(f"--- Executing SQL ---\n{clean_sql}\n" + "-"*50)
+        
+        # Configure query job
+        job_config = bigquery.QueryJobConfig(
+            use_query_cache=True,
+            maximum_bytes_billed=10**9
+        )
+        
+        bq_start = time.time()
+        query_job = bq_client.query(clean_sql, job_config=job_config)
+        
+        # Fetch results
+        results = []
+        column_names = None
+        row_count = 0
+        
+        for row in query_job.result(page_size=100):
+            if column_names is None:
+                column_names = list(row.keys())
+            
+            row_data = {col: str(row[col]) for col in column_names}
+            results.append(row_data)
+            row_count += 1
+        
+        bq_time = time.time() - bq_start
+        exec_time = time.time() - exec_start_time
+        
+        print(f"⏱️  BigQuery Execution: {bq_time:.3f}s")
+        
+        if row_count == 0:
+            log_performance_metric(
+                user=current_user,
+                user_type=user_type,
+                query=sql_query[:200],
+                total_time=exec_time,
+                sql_execution_time=bq_time,
+                rows_returned=0,
+                status='SUCCESS'
+            )
+            
+            return {
+                "status": "success",
+                "row_count": 0,
+                "execution_time": f"{exec_time:.3f}s",
+                "message": "Query executed successfully but returned no results."
+            }
+        
+        # Format results
+        result_lines = []
+        result_lines.append(f"📊 Found {row_count} transaction(s)\n")
+        result_lines.append(f"⏱️  Retrieved in {exec_time:.3f}s\n\n")
+        result_lines.append("=" * 100 + "\n")
+        
+        # Format each row
+        for idx, row in enumerate(results, 1):
+            result_lines.append(f"\n🔹 Transaction #{idx}\n")
+            result_lines.append("-" * 100 + "\n")
+            
+            for col, value in row.items():
+                if 'amount' in col.lower():
+                    result_lines.append(f"  💰 {col}: ₹{value}\n")
+                elif 'date' in col.lower() or 'at' in col.lower():
+                    result_lines.append(f"  📅 {col}: {value}\n")
+                elif 'status' in col.lower():
+                    emoji = "✅" if value == "SUCCESS" else "❌"
+                    result_lines.append(f"  {emoji} {col}: {value}\n")
+                elif 'id' in col.lower():
+                    result_lines.append(f"  🆔 {col}: {value}\n")
+                else:
+                    result_lines.append(f"  • {col}: {value}\n")
+        
+        result_lines.append("\n" + "=" * 100 + "\n")
+        result_lines.append(f"\n✅ Total: {row_count} transaction(s)\n")
+        result_lines.append(f"⏱️  Execution time: {exec_time:.3f}s\n")
+        result_lines.append(f"📊 Data processed: {query_job.total_bytes_processed or 0:,} bytes\n")
+        
+        log_query_attempt(current_user, sql_query, 'ALLOWED', row_count=row_count)
+        
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=sql_query[:200],
+            total_time=exec_time,
+            sql_execution_time=bq_time,
+            rows_returned=row_count,
+            bytes_processed=query_job.total_bytes_processed if query_job.total_bytes_processed else 0,
+            status='SUCCESS'
+        )
+        
+        return {
+            "status": "success",
+            "row_count": row_count,
+            "execution_time": f"{exec_time:.3f}s",
+            "bq_execution_time": f"{bq_time:.3f}s",
+            "bytes_processed": query_job.total_bytes_processed if query_job.total_bytes_processed else 0,
+            "columns": column_names,
+            "results": "".join(result_lines),
+            "raw_data": results,
+            "message": f"✅ Successfully retrieved {row_count} transaction(s)"
+        }
+        
+    except Exception as e:
+        exec_time = time.time() - exec_start_time
+        error_msg = f"❌ Error executing query: {str(e)}"
+        
+        log_query_attempt(current_user, sql_query, 'ERROR', error=str(e))
+        
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=sql_query[:200],
+            total_time=exec_time,
+            rows_returned=0,
+            status='ERROR'
+        )
+        
+        return {
+            "status": "error",
+            "execution_time": f"{exec_time:.3f}s",
+            "message": error_msg
+        }
 
 # --- 6. Run the Server ---
 if __name__ == "__main__":
