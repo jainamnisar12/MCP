@@ -1378,7 +1378,159 @@ async def execute_sql_query(
             "execution_time": f"{exec_time:.3f}s",
             "message": error_msg
         }
+    
 
+@mcp.tool
+async def execute_sql_query_streaming(
+    sql_query: str,
+    current_user: str = None,
+    user_type: str = 'customer'
+):
+    """
+    Step 2: Execute SQL and stream results line-by-line for real-time display.
+    This version yields results as they're fetched from BigQuery.
+    """
+    exec_start_time = time.time()
+
+    print(f"\n{'='*60}")
+    print(f"[SQL Exec Streaming] Executing for: {current_user} ({user_type.upper()})")
+    print(f"{'='*60}")
+
+    if not current_user:
+        yield {
+            "status": "error",
+            "message": "🚫 Authentication required"
+        }
+        return  # No value here - just stop the generator
+
+    try:
+        # Add LIMIT if not present
+        clean_sql = sql_query.strip()
+        if 'LIMIT' not in clean_sql.upper():
+            clean_sql = f"{clean_sql.rstrip(';')} LIMIT 1000"
+        
+        print(f"--- Executing SQL (Streaming) ---\n{clean_sql}\n" + "-"*50)
+        
+        # Configure query job
+        job_config = bigquery.QueryJobConfig(
+            use_query_cache=True,
+            maximum_bytes_billed=10**9
+        )
+        
+        bq_start = time.time()
+        query_job = bq_client.query(clean_sql, job_config=job_config)
+        
+        # Yield header immediately
+        yield {
+            "type": "header",
+            "message": "📊 Query executing...\n",
+            "sql_query": clean_sql
+        }
+        
+        # Stream results as they arrive
+        row_count = 0
+        column_names = None
+        
+        # Yield intro
+        yield {
+            "type": "intro",
+            "message": "=" * 100 + "\n"
+        }
+        
+        for row in query_job.result(page_size=10):  # Fetch in small batches
+            if column_names is None:
+                column_names = list(row.keys())
+                # Yield column headers
+                yield {
+                    "type": "columns",
+                    "columns": column_names,
+                    "message": f"📋 Columns: {', '.join(column_names)}\n\n"
+                }
+            
+            row_count += 1
+            
+            # Format row data
+            row_data = {}
+            row_text = f"\n🔹 Transaction #{row_count}\n"
+            row_text += "-" * 100 + "\n"
+            
+            for col in column_names:
+                value = str(row[col])
+                row_data[col] = value
+                
+                if 'amount' in col.lower():
+                    row_text += f"  💰 {col}: ₹{value}\n"
+                elif 'date' in col.lower() or 'at' in col.lower():
+                    row_text += f"  📅 {col}: {value}\n"
+                elif 'status' in col.lower():
+                    emoji = "✅" if value == "SUCCESS" else "❌" if value == "FAILED" else "⏳"
+                    row_text += f"  {emoji} {col}: {value}\n"
+                elif 'id' in col.lower():
+                    row_text += f"  🆔 {col}: {value}\n"
+                else:
+                    row_text += f"  • {col}: {value}\n"
+            
+            # Yield this row immediately
+            yield {
+                "type": "row",
+                "row_number": row_count,
+                "data": row_data,
+                "message": row_text
+            }
+        
+        bq_time = time.time() - bq_start
+        exec_time = time.time() - exec_start_time
+        
+        # Yield summary
+        summary_text = "\n" + "=" * 100 + "\n"
+        summary_text += f"\n✅ Total: {row_count} transaction(s)\n"
+        summary_text += f"⏱️  Execution time: {exec_time:.3f}s\n"
+        summary_text += f"📊 Data processed: {query_job.total_bytes_processed or 0:,} bytes\n"
+        
+        yield {
+            "type": "summary",
+            "row_count": row_count,
+            "execution_time": exec_time,
+            "bq_execution_time": bq_time,
+            "bytes_processed": query_job.total_bytes_processed if query_job.total_bytes_processed else 0,
+            "message": summary_text
+        }
+        
+        # Log audit
+        log_query_attempt(current_user, sql_query, 'ALLOWED', row_count=row_count)
+        
+        # Log performance
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=sql_query[:200],
+            total_time=exec_time,
+            sql_execution_time=bq_time,
+            rows_returned=row_count,
+            bytes_processed=query_job.total_bytes_processed if query_job.total_bytes_processed else 0,
+            status='SUCCESS'
+        )
+        
+    except Exception as e:
+        exec_time = time.time() - exec_start_time
+        error_msg = f"❌ Error executing query: {str(e)}"
+        
+        log_query_attempt(current_user, sql_query, 'ERROR', error=str(e))
+        
+        log_performance_metric(
+            user=current_user,
+            user_type=user_type,
+            query=sql_query[:200],
+            total_time=exec_time,
+            rows_returned=0,
+            status='ERROR'
+        )
+        
+        yield {
+            "type": "error",
+            "execution_time": exec_time,
+            "message": error_msg
+        }
 # --- 6. Run the Server ---
 if __name__ == "__main__":
     print("\n" + "=" * 60)
