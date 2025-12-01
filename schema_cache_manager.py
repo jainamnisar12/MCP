@@ -496,14 +496,7 @@ def format_schema_for_llm(schema_info: Dict, table_contexts: Dict) -> str:
         
         if context.get("sensitive"):
             schema_parts.append(f"🔒 Sensitive Data: Yes - Row-level security enforced")
-        
-        # Add Partitioning Info
-        if info.get("time_partitioning"):
-            field = info.get("time_partitioning_field", "_PARTITIONDATE")
-            schema_parts.append(f"⚡ PARTITIONED BY: {field} ({info['time_partitioning']})")
-        elif info.get("range_partitioning"):
-            schema_parts.append(f"⚡ PARTITIONED BY: {info['range_partitioning']} (Range)")
-        
+
         schema_parts.append("\n📋 Columns:")
         
         for field in info["fields"]:

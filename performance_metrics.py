@@ -23,23 +23,24 @@ class PerformanceMetrics:
     user: str
     user_type: str
     query: str
-    
+
     # Timing metrics (in seconds)
     total_time: float
     sql_generation_time: Optional[float] = None
     sql_execution_time: Optional[float] = None
+    output_formatting_time: Optional[float] = None
     pdf_search_time: Optional[float] = None
     agent_response_time: Optional[float] = None
-    
+
     # Query metrics
     rows_returned: Optional[int] = None
     bytes_processed: Optional[int] = None
     cache_hit: bool = False
-    
+
     # Tool usage
     tools_used: list = None
     tool_count: int = 0
-    
+
     # Status
     status: str = "SUCCESS"
     error_message: Optional[str] = None
@@ -251,20 +252,27 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     })
     sql_gen_time = time.time() - sql_start
     print(f"⏱️  SQL Generation: {sql_gen_time:.3f}s")
-    
+
     sql_query = sql_response.content.strip()
-    
+
     # ... validation checks ...
-    
+
     # Track SQL execution time
     sql_exec_start = time.time()
     text_result, df_result = _execute_query(sql_query, current_user, user_type)
     sql_exec_time = time.time() - sql_exec_start
     print(f"⏱️  SQL Execution: {sql_exec_time:.3f}s")
-    
+
+    # Track output formatting time
+    format_start = time.time()
+    # ... build response string ...
+    formatted_response = build_response(df_result, sql_query)
+    output_format_time = time.time() - format_start
+    print(f"⏱️  Output Formatting: {output_format_time:.3f}s")
+
     # Calculate total time
     total_time = time.time() - start_time
-    
+
     # Log performance metric
     metric = PerformanceMetrics(
         timestamp=datetime.now().isoformat(),
@@ -274,16 +282,17 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
         total_time=total_time,
         sql_generation_time=sql_gen_time,
         sql_execution_time=sql_exec_time,
+        output_formatting_time=output_format_time,
         rows_returned=len(df_result) if df_result is not None else 0,
         tools_used=['query_customer_database'],
         tool_count=1,
         status='SUCCESS' if df_result is not None else 'ERROR'
     )
-    
+
     perf_logger.info(metric.to_json())
-    
+
     print(f"⏱️  Total Tool Time: {total_time:.3f}s")
     print(f"{'='*60}\n")
-    
+
     # ... return response ...
 """

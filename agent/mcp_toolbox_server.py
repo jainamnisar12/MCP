@@ -111,37 +111,39 @@ def log_performance_metric(
     total_time: float,
     sql_generation_time: float = None,
     sql_execution_time: float = None,
+    output_formatting_time: float = None,
     pdf_search_time: float = None,
     rows_returned: int = None,
     bytes_processed: int = None,
-    status: str = "SUCCESS",
-    query_id: str = None
+    status: str = "SUCCESS"
 ):
     """Log performance metrics for MCP tool calls"""
     metric = {
-        'query_id': query_id,  # For correlation with agent logs
         'timestamp': datetime.now().isoformat(),
         'user': user,
         'user_type': user_type,
-        'query': query[:200],  # Truncate long queries
-        'total_time': round(total_time, 3),
+        'query': query[:200],
         'sql_generation_time': round(sql_generation_time, 3) if sql_generation_time else None,
         'sql_execution_time': round(sql_execution_time, 3) if sql_execution_time else None,
-        'pdf_search_time': round(pdf_search_time, 3) if pdf_search_time else None,
+        'output_formatting_time': round(output_formatting_time, 3) if output_formatting_time else None,
+        'total_time': round(total_time, 3),
         'rows_returned': rows_returned,
         'bytes_processed': bytes_processed,
         'status': status
     }
-    
+
+    # Log only JSON format
     perf_logger.info(json.dumps(metric))
-    
-    # Print real-time performance summary
+
+    # Print real-time performance summary to console
     print(f"\n{'─'*60}")
     print(f"⏱️  MCP Tool Performance:")
     if sql_generation_time:
         print(f"   • SQL Generation: {sql_generation_time:.3f}s")
     if sql_execution_time:
         print(f"   • SQL Execution: {sql_execution_time:.3f}s")
+    if output_formatting_time:
+        print(f"   • Output Formatting: {output_formatting_time:.3f}s")
     if pdf_search_time:
         print(f"   • PDF Search: {pdf_search_time:.3f}s")
     print(f"   • Total Time: {total_time:.3f}s")
@@ -425,29 +427,17 @@ def ask_upi_document(question: str) -> str:
             "question": question
         })
         llm_time = time.time() - llm_start
-        
-        total_time = time.time() - start_time
-        
-        log_performance_metric(
-            user='SYSTEM',
-            user_type='pdf_query',
-            query=question,
-            total_time=total_time,
-            pdf_search_time=search_time + llm_time,
-            rows_returned=len(docs),
-            status='SUCCESS'
-        )
-        
-        print(f"⏱️  PDF Query completed in {total_time:.3f}s (Search: {search_time:.3f}s, LLM: {llm_time:.3f}s)")
-        
-        # Build enhanced response with sources and exact text
+
+        # Build enhanced response with sources and exact text - track formatting time
+        formatting_start = time.time()
+
         enhanced_response = []
         enhanced_response.append("[ANSWER]")
         enhanced_response.append(response.content)
         enhanced_response.append("")
         enhanced_response.append("[SOURCES AND EXACT TEXT]")
         enhanced_response.append("")
-        
+
         if source_info and len(source_info) > 0:
             print(f"📝 Including {len(source_info)} sources in response")
             for i, (source, similarity, exact_text) in enumerate(source_info, 1):
@@ -472,7 +462,23 @@ def ask_upi_document(question: str) -> str:
                 enhanced_response.append("")
                 enhanced_response.append("-" * 50)
                 enhanced_response.append("")
-        
+
+        output_format_time = time.time() - formatting_start
+        total_time = time.time() - start_time
+
+        log_performance_metric(
+            user='SYSTEM',
+            user_type='pdf_query',
+            query=question,
+            total_time=total_time,
+            pdf_search_time=search_time + llm_time,
+            output_formatting_time=output_format_time,
+            rows_returned=len(docs),
+            status='SUCCESS'
+        )
+
+        print(f"⏱️  PDF Query completed in {total_time:.3f}s (Search: {search_time:.3f}s, LLM: {llm_time:.3f}s, Formatting: {output_format_time:.3f}s)")
+
         return "\n".join(enhanced_response)
         
     except Exception as e:
@@ -628,12 +634,15 @@ sql_prompt = ChatPromptTemplate.from_messages([
     - The upi_transaction table contains all transaction data (55,000+ rows)
     - The old tables are empty and deprecated
 
-    **PARTITIONING & PERFORMANCE (CRITICAL)**:
-    - CHECK THE SCHEMA for tables marked with `⚡ PARTITIONED BY`.
-    - **YOU MUST ALWAYS FILTER BY THE PARTITION COLUMN** for these tables.
-    - If the user does NOT specify a date range for a partitioned table, **DEFAULT TO THE LAST 30 DAYS**.
-    - Example: `WHERE initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)`
-    - Never scan a partitioned table without a filter on the partition column.
+    **DATE FILTERING RULES**:
+    - Only add date filters when the user explicitly requests a time range
+    - For general queries like "show my transactions", do NOT add date filters
+    - Always sort by most recent: `ORDER BY initiated_at DESC`
+    - Examples:
+      * User: "show my transactions" → No date filter, just ORDER BY
+      * User: "recent transactions" → Add LIMIT 100, ORDER BY initiated_at DESC
+      * User: "last 30 days" → Add `WHERE initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)`
+      * User: "transactions in January 2025" → Use specific date range
 
     **CRITICAL SECURITY RULES**:
     - Current user context: {{current_user}}
@@ -659,23 +668,40 @@ sql_prompt = ChatPromptTemplate.from_messages([
     - Do NOT add LIMIT clause - the system handles this automatically
 
     **Query Patterns with Security for CUSTOMERS**:
-    - "my transactions" (Defaults to last 30 days) →
+    - "my transactions" or "show my transactions" →
       SELECT t.* FROM {config.BIGQUERY_DATASET}.upi_transaction t
       JOIN {config.BIGQUERY_DATASET}.upi_customer c ON t.payer_vpa = c.primary_vpa
       WHERE c.name = {{current_user}}
-      AND t.initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+      ORDER BY t.initiated_at DESC
+
+    - "my recent transactions" →
+      SELECT t.* FROM {config.BIGQUERY_DATASET}.upi_transaction t
+      JOIN {config.BIGQUERY_DATASET}.upi_customer c ON t.payer_vpa = c.primary_vpa
+      WHERE c.name = {{current_user}}
+      ORDER BY t.initiated_at DESC
+      LIMIT 100
 
     - "my account details" →
       SELECT * FROM {config.BIGQUERY_DATASET}.upi_customer
       WHERE name = {{current_user}}
 
     **Query Patterns with Security for MERCHANTS**:
-    - "my transactions" or "transactions to my store" (Defaults to last 30 days) →
+    - "my transactions" or "transactions to my store" →
       SELECT t.* FROM {config.BIGQUERY_DATASET}.upi_transaction t
       WHERE t.payee_vpa = {{current_user}}
-      AND t.initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+      ORDER BY t.initiated_at DESC
 
-    - "total sales" or "revenue" (Defaults to last 30 days) →
+    - "my recent transactions" →
+      SELECT t.* FROM {config.BIGQUERY_DATASET}.upi_transaction t
+      WHERE t.payee_vpa = {{current_user}}
+      ORDER BY t.initiated_at DESC
+      LIMIT 100
+
+    - "total sales" or "revenue" (all time) →
+      SELECT SUM(amount) as total_sales FROM {config.BIGQUERY_DATASET}.upi_transaction t
+      WHERE t.payee_vpa = {{current_user}} AND t.status = 'SUCCESS'
+
+    - "sales in last 30 days" →
       SELECT SUM(amount) as total_sales FROM {config.BIGQUERY_DATASET}.upi_transaction t
       WHERE t.payee_vpa = {{current_user}} AND t.status = 'SUCCESS'
       AND t.initiated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
@@ -993,47 +1019,24 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     sql_exec_start = time.time()
     text_result, df_result = _execute_query(sql_query, current_user, user_type)
     sql_exec_time = time.time() - sql_exec_start
-    
+
     if df_result is not None:
         rows_returned = len(df_result)
-    
-    # 8. Calculate total time and log
-    total_time = time.time() - tool_start_time
-    
-    log_performance_metric(
-        user=current_user,
-        user_type=user_type,
-        query=natural_language_query,
-        total_time=total_time,
-        sql_generation_time=sql_gen_time,
-        sql_execution_time=sql_exec_time,
-        rows_returned=rows_returned,
-        bytes_processed=bytes_processed,
-        status='SUCCESS' if df_result is not None else 'ERROR'
-    )
-    
 
-    # Log audit
-    if df_result is not None:
-        log_query_attempt(
-            user=current_user,
-            query=natural_language_query,
-            status='ALLOWED',
-            row_count=len(df_result)
-        )
-    
-    # 9. Build response with SQL at the top
+    # 8. Build response with SQL at the top and track formatting time
+    formatting_start = time.time()
+
     clean_sql = sql_query.strip().replace("```sql", "").replace("```", "")
-    
+
     response_parts = []
-    
+
     # SQL Section - Always at the top with clear marker
     response_parts.append("[SQL QUERY]")
     response_parts.append(clean_sql)
     response_parts.append("")
     response_parts.append("[DATA RESULTS]")
     response_parts.append("")
-    
+
     # Data Section
     if df_result is not None:
         if not df_result.empty:
@@ -1059,7 +1062,35 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     else:
         # Error case - text_result contains the error message
         response_parts.append(text_result)
-    
+
+    output_format_time = time.time() - formatting_start
+
+    # 9. Calculate total time and log
+    total_time = time.time() - tool_start_time
+
+    log_performance_metric(
+        user=current_user,
+        user_type=user_type,
+        query=natural_language_query,
+        total_time=total_time,
+        sql_generation_time=sql_gen_time,
+        sql_execution_time=sql_exec_time,
+        output_formatting_time=output_format_time,
+        rows_returned=rows_returned,
+        bytes_processed=bytes_processed,
+        status='SUCCESS' if df_result is not None else 'ERROR'
+    )
+
+
+    # Log audit
+    if df_result is not None:
+        log_query_attempt(
+            user=current_user,
+            query=natural_language_query,
+            status='ALLOWED',
+            row_count=len(df_result)
+        )
+
     return "\n".join(response_parts)
 
 @mcp.tool
@@ -1072,9 +1103,10 @@ async def generate_sql_for_query(
     Step 1: Generate SQL query from natural language.
     Validates the request and generates the SQL query.
     """
+    tool_call_start = datetime.now().isoformat()
     tool_start_time = time.time()
     sql_gen_time = None
-    
+
     print(f"\n{'='*60}")
     print(f"[SQL Gen] Query: {natural_language_query}")
     print(f"[SQL Gen] User: {current_user or 'NONE'} ({user_type.upper()})")
@@ -1172,7 +1204,7 @@ async def generate_sql_for_query(
             }
 
     total_time = time.time() - tool_start_time
-    
+
     # Log performance
     log_performance_metric(
         user=current_user,
@@ -1201,7 +1233,7 @@ async def execute_sql_query(
     Step 2: Execute SQL and return formatted results.
     """
     exec_start_time = time.time()
-    
+
     print(f"\n{'='*60}")
     print(f"[SQL Exec] Executing for: {current_user} ({user_type.upper()})")
     print(f"{'='*60}")
@@ -1243,11 +1275,12 @@ async def execute_sql_query(
             row_count += 1
         
         bq_time = time.time() - bq_start
-        exec_time = time.time() - exec_start_time
-        
+
         print(f"⏱️  BigQuery Execution: {bq_time:.3f}s")
-        
+
         if row_count == 0:
+            exec_time = time.time() - exec_start_time
+
             log_performance_metric(
                 user=current_user,
                 user_type=user_type,
@@ -1257,25 +1290,27 @@ async def execute_sql_query(
                 rows_returned=0,
                 status='SUCCESS'
             )
-            
+
             return {
                 "status": "success",
                 "row_count": 0,
                 "execution_time": f"{exec_time:.3f}s",
                 "message": "Query executed successfully but returned no results."
             }
-        
-        # Format results
+
+        # Format results with timing
+        formatting_start = time.time()
+
         result_lines = []
         result_lines.append(f"📊 Found {row_count} transaction(s)\n")
-        result_lines.append(f"⏱️  Retrieved in {exec_time:.3f}s\n\n")
+        result_lines.append(f"⏱️  Retrieved in {time.time() - exec_start_time:.3f}s\n\n")
         result_lines.append("=" * 100 + "\n")
-        
+
         # Format each row
         for idx, row in enumerate(results, 1):
             result_lines.append(f"\n🔹 Transaction #{idx}\n")
             result_lines.append("-" * 100 + "\n")
-            
+
             for col, value in row.items():
                 if 'amount' in col.lower():
                     result_lines.append(f"  💰 {col}: ₹{value}\n")
@@ -1288,20 +1323,24 @@ async def execute_sql_query(
                     result_lines.append(f"  🆔 {col}: {value}\n")
                 else:
                     result_lines.append(f"  • {col}: {value}\n")
-        
+
         result_lines.append("\n" + "=" * 100 + "\n")
         result_lines.append(f"\n✅ Total: {row_count} transaction(s)\n")
-        result_lines.append(f"⏱️  Execution time: {exec_time:.3f}s\n")
+        result_lines.append(f"⏱️  Execution time: {time.time() - exec_start_time:.3f}s\n")
         result_lines.append(f"📊 Data processed: {query_job.total_bytes_processed or 0:,} bytes\n")
-        
+
+        output_format_time = time.time() - formatting_start
+        exec_time = time.time() - exec_start_time
+
         log_query_attempt(current_user, sql_query, 'ALLOWED', row_count=row_count)
-        
+
         log_performance_metric(
             user=current_user,
             user_type=user_type,
             query=sql_query[:200],
             total_time=exec_time,
             sql_execution_time=bq_time,
+            output_formatting_time=output_format_time,
             rows_returned=row_count,
             bytes_processed=query_job.total_bytes_processed if query_job.total_bytes_processed else 0,
             status='SUCCESS'
@@ -1379,7 +1418,3 @@ if __name__ == "__main__":
         port=8001,
         path="/sse"           
     )
-
-# Performance monitoring tools removed
-
-# Performance optimizations removed
