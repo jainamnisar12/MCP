@@ -220,7 +220,8 @@ llm = ChatVertexAI(
     model_name="gemini-2.5-flash",
     project=config.GCP_PROJECT_ID,
     location=config.GCP_LOCATION,
-    temperature=0
+    temperature=0,
+    thinking_budget=0
 )
 
 embeddings = VertexAIEmbeddings(
@@ -331,9 +332,12 @@ pdf_generation_chain = pdf_prompt | llm
 @mcp.tool
 def ask_upi_document(question: str) -> str:
     """
-    Answers questions about the UPI (Unified Payments Interface) process
-    by searching PDF documents in BigQuery. Use this for questions about
-    how UPI works, its features, security, limits, or history.
+    Answers questions by searching both PDF documents and website content in BigQuery.
+    Use this for questions about:
+    - UPI (Unified Payments Interface): how it works, features, security, limits, history
+    - Mindgate Solutions: products, services, payment solutions, offerings
+    - Digital payment solutions, transaction banking, government solutions
+    - Any other topics covered in the knowledge base
     """
     start_time = time.time()
 
@@ -363,26 +367,52 @@ def ask_upi_document(question: str) -> str:
                 print(f"� Query embedding dimensions: {len(query_embedding)}")
                 print(f"📊 Query embedding (first 5 values): {query_embedding[:5]}")
                 
-                print(f"�🔍 Searching new BigQuery table for PDF embeddings with similarity threshold: 0.3")
-                results = bq_vector_store.similarity_search(
+                print(f"🔍 Searching new BigQuery table for PDF embeddings with similarity threshold: 0.3")
+                results_pdf = bq_vector_store.similarity_search(
                     query_embedding=query_embedding,
-                    k=3,
-                    similarity_threshold=0.3
+                    k=5,
+                    similarity_threshold=0.6,
+                    source_type="pdf"
                 )
                 
-                print(f"📊 BigQuery returned {len(results)} results")
+                print(f"🔍 Searching new BigQuery table for Website embeddings with similarity threshold: 0.3")
+                results_web = bq_vector_store.similarity_search(
+                    query_embedding=query_embedding,
+                    k=5,
+                    similarity_threshold=0.7,
+                    source_type="website"
+                )
                 
-                # Log detailed results
+                # Combine results
+                results = results_pdf + results_web
+                # Sort by similarity score
+                results.sort(key=lambda x: x.get('similarity_score', 0), reverse=True)
+                # Take top 5
+                results = results[:5]
+                
+                print(f"📊 BigQuery returned {len(results)} combined results")
+                
+                # Log detailed results with FULL content
+                print(f"\n{'='*80}")
+                print(f"📦 RETRIEVED CHUNKS/VECTORS:")
+                print(f"{'='*80}")
                 for i, result in enumerate(results):
-                    print(f"📄 Result {i+1}:")
-                    print(f"   • Source: {result.get('source_name', 'Unknown')}")
-                    print(f"   • Similarity: {result.get('similarity_score', 0):.4f}")
-                    print(f"   • Content preview: {result.get('content', '')[:150]}...")
-                    print(f"   • Content length: {len(result.get('content', ''))} chars")
+                    print(f"\n📄 CHUNK {i+1}:")
+                    print(f"   Source: {result.get('source_name', 'Unknown')}")
+                    print(f"   Similarity Score: {result.get('similarity_score', 0):.4f}")
+                    print(f"   Content Length: {len(result.get('content', ''))} chars")
+                    print(f"\n   FULL CONTENT:")
+                    print(f"   {'-'*76}")
+                    content = result.get('content', '')
+                    # Print content with indentation
+                    for line in content.split('\n'):
+                        print(f"   {line}")
+                    print(f"   {'-'*76}")
+                print(f"\n{'='*80}\n")
                 
                 docs = [type('Doc', (), {'page_content': r['content']}) for r in results]
                 # Store source information for later reference
-                source_info = [(r.get('source_name', 'UPI Document'), r.get('similarity_score', 0), r['content']) for r in results]
+                source_info = [(r.get('source_name', 'Document'), r.get('similarity_score', 0), r['content']) for r in results]
                 print(f"📝 Created source_info with {len(source_info)} entries")
             except ImportError as e:
                 print(f"⚠️  New BigQuery vector store import failed: {e}")

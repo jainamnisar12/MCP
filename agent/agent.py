@@ -213,6 +213,7 @@ root_agent = Agent(
         model_name="gemini-2.5-flash",
         project=config.GCP_PROJECT_ID,
         location=config.GCP_LOCATION,
+        thinking_budget=0,
     ),
     instruction=(
         f"You are a friendly and secure banking assistant with access to specialized tools.\n"
