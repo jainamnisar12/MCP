@@ -102,7 +102,7 @@ class NewBigQueryVectorStore:
         print(f"✅ All {len(rows_to_insert)} embeddings inserted successfully!")
         return True
 
-    def similarity_search(self, query_embedding: list, k: int = 5, similarity_threshold: float = 0.7):
+    def similarity_search(self, query_embedding: list, k: int = 5, similarity_threshold: float = 0.7, source_type: str = "pdf"):
         """Perform similarity search using cosine similarity."""
         
         print(f"🔍 BigQuery similarity search starting...")
@@ -135,7 +135,7 @@ class NewBigQueryVectorStore:
                     )
                 ) as similarity_score
             FROM `{self.full_table_id}`
-            WHERE source_type = 'pdf'
+            WHERE source_type = '{source_type}'
         )
         SELECT 
             id,
@@ -180,8 +180,9 @@ class NewBigQueryVectorStore:
 def index_upi_pdf():
     """Index the UPI Transaction Process Explained PDF into new BigQuery table."""
     
-    # Path to your UPI PDF
-    pdf_path = "/Users/bilal/Desktop/MCP/data/UPI Transaction Process Explained.pdf"
+    # Path to your UPI PDF (relative to script location)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    pdf_path = os.path.join(script_dir, "data", "UPI Transaction Process Explained.pdf")
     
     print("\n" + "="*60)
     print("📄 INDEXING UPI PDF TO NEW BIGQUERY TABLE")
@@ -259,38 +260,54 @@ def index_upi_pdf():
 
     print(f"✓ Created {len(embeddings_data)} PDF chunk embeddings")
 
-    # Step 5: Initialize new BigQuery Vector Store and insert
-    print("\n[5/5] Storing embeddings in new BigQuery table...")
-    try:
-        vector_store = NewBigQueryVectorStore()
-        vector_store.create_embeddings_table()
+    # Step 5: Log chunks instead of storing in BigQuery
+    print("\n[5/5] Logging chunks (BigQuery insertion commented out)...")
+    print("\n" + "="*80)
+    print("📦 GENERATED PDF CHUNKS:")
+    print("="*80)
+    
+    for i, chunk_data in enumerate(embeddings_data):
+        print(f"\n{'─'*80}")
+        print(f"CHUNK {i+1}/{len(embeddings_data)}")
+        print(f"{'─'*80}")
+        print(f"ID: {chunk_data['id']}")
+        print(f"Source: {chunk_data['source_name']}")
+        print(f"Page: {chunk_data['metadata'].get('page', 'N/A')}")
+        print(f"Chunk Index: {chunk_data['metadata']['chunk_index']}")
+        print(f"Content Length: {len(chunk_data['content'])} chars")
+        print(f"Embedding Dimensions: {len(chunk_data['embedding'])}")
+        print(f"\nCONTENT:")
+        print(f"{'-'*80}")
+        print(chunk_data['content'])
+        print(f"{'-'*80}")
+    
+    print(f"\n{'='*80}\n")
 
-        success = vector_store.insert_embeddings(
-            embeddings_data=embeddings_data,
-            source_type="pdf"
-        )
+    # COMMENTED OUT: BigQuery insertion
+    # print("\n[5/5] Storing embeddings in new BigQuery table...")
+    # vector_store = NewBigQueryVectorStore(dataset_name=config.BIGQUERY_DATASET)
+    # 
+    # # Create table
+    # vector_store.create_embeddings_table()
+    # 
+    # # Insert embeddings
+    # success = vector_store.insert_embeddings(
+    #     embeddings_data=embeddings_data,
+    #     source_type="pdf"
+    # )
+    # 
+    # if not success:
+    #     print("❌ Failed to insert embeddings")
+    #     return False
 
-        if success:
-            print("\n" + "="*60)
-            print("✅ UPI PDF INDEXED IN NEW BIGQUERY TABLE!")
-            print("="*60)
-            print(f"📄 PDF: {pdf_name}")
-            print(f"📊 Total chunks indexed: {len(embeddings_data)}")
-            print(f"🗄️  Dataset: {config.BIGQUERY_DATASET}")
-            print(f"📋 Table: vector_embeddings_new")
-            print(f"🔧 Embedding model: gemini-embedding-001 (Vertex AI)")
-            print(f"📐 Embedding dimensions: {len(embeddings_data[0]['embedding']) if embeddings_data else 'N/A'}")
-            print("="*60 + "\n")
-            return True
-        else:
-            print("❌ Failed to insert embeddings")
-            return False
-
-    except Exception as e:
-        print(f"❌ Error storing embeddings: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    print("\n" + "="*60)
+    print("✅ PDF CHUNKS LOGGED SUCCESSFULLY (NOT PUSHED TO BIGQUERY)")
+    print("="*60)
+    print(f"📄 PDF: {os.path.basename(pdf_path)}")
+    print(f"📊 Total chunks logged: {len(embeddings_data)}")
+    print("="*60 + "\n")
+    
+    return True
 
 
 if __name__ == "__main__":
