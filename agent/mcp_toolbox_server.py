@@ -458,40 +458,11 @@ def ask_upi_document(question: str) -> str:
         })
         llm_time = time.time() - llm_start
 
-        # Build enhanced response with sources and exact text - track formatting time
+        # Build response - only include the answer, not the sources
         formatting_start = time.time()
 
-        enhanced_response = []
-        enhanced_response.append("[ANSWER]")
-        enhanced_response.append(response.content)
-        enhanced_response.append("")
-        enhanced_response.append("[SOURCES AND EXACT TEXT]")
-        enhanced_response.append("")
-
-        if source_info and len(source_info) > 0:
-            print(f"📝 Including {len(source_info)} sources in response")
-            for i, (source, similarity, exact_text) in enumerate(source_info, 1):
-                enhanced_response.append(f"**Source {i}: {source}**")
-                if similarity > 0:
-                    enhanced_response.append(f"Similarity Score: {similarity:.3f}")
-                enhanced_response.append("")
-                enhanced_response.append("Exact Text:")
-                enhanced_response.append(f'"{exact_text[:500]}..."' if len(exact_text) > 500 else f'"{exact_text}"')
-                enhanced_response.append("")
-                enhanced_response.append("-" * 50)
-                enhanced_response.append("")
-        else:
-            print(f"⚠️  No source_info available, using document content as fallback")
-            # Fallback: use the document content directly
-            for i, doc in enumerate(docs, 1):
-                enhanced_response.append(f"**Source {i}: PDF Document**")
-                enhanced_response.append("")
-                enhanced_response.append("Exact Text:")
-                content = doc.page_content
-                enhanced_response.append(f'"{content[:500]}..."' if len(content) > 500 else f'"{content}"')
-                enhanced_response.append("")
-                enhanced_response.append("-" * 50)
-                enhanced_response.append("")
+        # Return only the answer without the sources section
+        final_response = response.content
 
         output_format_time = time.time() - formatting_start
         total_time = time.time() - start_time
@@ -509,7 +480,7 @@ def ask_upi_document(question: str) -> str:
 
         print(f"⏱️  PDF Query completed in {total_time:.3f}s (Search: {search_time:.3f}s, LLM: {llm_time:.3f}s, Formatting: {output_format_time:.3f}s)")
 
-        return "\n".join(enhanced_response)
+        return final_response
         
     except Exception as e:
         total_time = time.time() - start_time
@@ -976,7 +947,6 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     # 4. Use full schema (RAG removed)
     relevant_schema_text = formatted_schema
     print(f"[RAG] Using full schema ({len(schema_info)} tables)")
-    rag_retrieval_time = 0.0
 
     # 5. Generate SQL with LLM
     sql_gen_start = time.time()
@@ -1053,45 +1023,25 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
     if df_result is not None:
         rows_returned = len(df_result)
 
-    # 8. Build response with SQL at the top and track formatting time
+    # 8. Return ONLY metadata - let the agent format the data
+    # This prevents duplicate output
     formatting_start = time.time()
 
     clean_sql = sql_query.strip().replace("```sql", "").replace("```", "")
 
-    response_parts = []
+    # Return minimal metadata - agent will handle formatting
+    if df_result is not None and not df_result.empty:
+        # Convert to simple list of dicts
+        data = df_result.to_dict('records')
 
-    # SQL Section - Always at the top with clear marker
-    response_parts.append("[SQL QUERY]")
-    response_parts.append(clean_sql)
-    response_parts.append("")
-    response_parts.append("[DATA RESULTS]")
-    response_parts.append("")
-
-    # Data Section
-    if df_result is not None:
-        if not df_result.empty:
-            if df_result.shape == (1, 1):
-                # Single value
-                value = df_result.iloc[0, 0]
-                if isinstance(value, float):
-                    response_parts.append(f"Result: {value:,.2f}")
-                else:
-                    response_parts.append(f"Result: {value}")
-            else:
-                # Table
-                response_parts.append(f"Rows: {len(df_result)}")
-                response_parts.append("")
-                table_str = df_result.to_string(
-                    index=False,
-                    max_colwidth=25,
-                    justify='left'
-                )
-                response_parts.append(table_str)
-        else:
-            response_parts.append("No results found.")
+        # Return structured data for agent to format
+        # Use a format that tells the agent what to do WITHOUT showing raw data
+        response = f"Query executed successfully. SQL: {clean_sql}\n\nFound {len(data)} transactions. Present them in a clear numbered list format with the SQL query in a code block."
+    elif df_result is not None:
+        response = f"Query executed successfully. SQL: {clean_sql}\n\nNo results found."
     else:
-        # Error case - text_result contains the error message
-        response_parts.append(text_result)
+        # Error case
+        response = text_result
 
     output_format_time = time.time() - formatting_start
 
@@ -1121,19 +1071,18 @@ def query_customer_database(natural_language_query: str, current_user: str = Non
             row_count=len(df_result)
         )
 
-    return "\n".join(response_parts)
+    return response
 
 @mcp.tool
 async def generate_sql_for_query(
     natural_language_query: str,
     current_user: str = None,
     user_type: str = 'customer'
-):
+) -> str:
     """
     Step 1: Generate SQL query from natural language.
-    Validates the request and generates the SQL query.
+    Returns SQL wrapped in markdown code block, ready to display.
     """
-    tool_call_start = datetime.now().isoformat()
     tool_start_time = time.time()
     sql_gen_time = None
 
@@ -1144,31 +1093,22 @@ async def generate_sql_for_query(
 
     # 1. Authentication check
     if not current_user:
-        return {
-            "status": "error",
-            "message": "🚫 Access Denied: Authentication required to access customer data."
-        }
+        return "🚫 Access Denied: Authentication required to access customer data."
     
     # 2. Rate Limiting
     is_allowed, limit_msg = rate_limiter.is_allowed(current_user)
     if not is_allowed:
         log_query_attempt(current_user, natural_language_query, 'BLOCKED', 'Rate limit exceeded')
-        return {
-            "status": "error",
-            "message": limit_msg
-        }
+        return limit_msg
     
     # 3. Access permission check (customers only)
     if user_type == 'customer':
         is_allowed, error_msg = _check_access_permission(natural_language_query, current_user)
         if not is_allowed:
             log_query_attempt(current_user, natural_language_query, 'BLOCKED', 'Unauthorized access pattern')
-            return {
-                "status": "error",
-                "message": error_msg
-            }
+            return error_msg
 
-    # 4. Use full schema (RAG removed)
+    # 4. Use full schema
     relevant_schema_text = formatted_schema
     print(f"[RAG] Using full schema ({len(schema_info)} tables)")
 
@@ -1190,48 +1130,34 @@ async def generate_sql_for_query(
     if "ACCESS_DENIED" in sql_query:
         log_query_attempt(current_user, natural_language_query, 'BLOCKED', 'LLM detected unauthorized access')
         log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='ACCESS_DENIED')
-        return {
-            "status": "error",
-            "message": "🚫 Access Denied: You can only query your own data."
-        }
+        return "🚫 Access Denied: You can only query your own data."
 
     # Validate SQL
     if "cannot answer" in sql_query.lower():
         log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='GENERATION_FAILED')
-        return {
-            "status": "error",
-            "message": "I'm sorry, but I cannot answer that question with the available database schema."
-        }
+        return "I'm sorry, but I cannot answer that question with the available database schema."
 
-    sql_query = sql_query.replace("```SQL", "").replace("```", "").strip()
+    # Clean SQL query - remove any existing code block markers
+    sql_query = sql_query.replace("```SQL", "").replace("```sql", "").replace("```", "").strip()
     sql_upper = sql_query.upper()
     
     if not (sql_upper.startswith('SELECT') or sql_upper.startswith('WITH') or sql_upper.startswith('/*')):
         log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='INVALID_SQL')
-        return {
-            "status": "error",
-            "message": "I encountered an issue generating a SQL query. Please try rephrasing your question."
-        }
+        return "I encountered an issue generating a SQL query. Please try rephrasing your question."
 
     # Security validation
     is_valid_type, error_msg = validate_query_type(sql_query)
     if not is_valid_type:
         log_query_attempt(current_user, sql_query, 'BLOCKED', 'Prohibited query type detected')
         log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='BLOCKED_TYPE')
-        return {
-            "status": "error",
-            "message": error_msg
-        }
+        return error_msg
 
     if current_user and user_type == 'customer':
         is_valid, error_msg = validate_sql_access(sql_query, current_user)
         if not is_valid:
             log_query_attempt(current_user, sql_query, 'BLOCKED', 'Row-level security violation')
             log_performance_metric(current_user, user_type, natural_language_query, time.time() - tool_start_time, sql_gen_time, status='BLOCKED_ACCESS')
-            return {
-                "status": "error",
-                "message": error_msg
-            }
+            return error_msg
 
     total_time = time.time() - tool_start_time
 
@@ -1245,12 +1171,8 @@ async def generate_sql_for_query(
         status='SUCCESS'
     )
     
-    return {
-        "status": "success",
-        "sql_query": sql_query,
-        "generation_time": f"{sql_gen_time:.3f}s",
-        "message": f"✅ SQL query generated successfully in {sql_gen_time:.3f}s"
-    }
+    # Return SQL in code block - agent should display as-is without adding another code block
+    return sql_query
 
 
 @mcp.tool
@@ -1258,9 +1180,10 @@ async def execute_sql_query(
     sql_query: str,
     current_user: str = None,
     user_type: str = 'customer'
-):
+) -> str:
     """
     Step 2: Execute SQL and return formatted results.
+    Returns only the formatted transaction list as a string (no header/footer).
     """
     exec_start_time = time.time()
 
@@ -1269,10 +1192,7 @@ async def execute_sql_query(
     print(f"{'='*60}")
 
     if not current_user:
-        return {
-            "status": "error",
-            "message": "🚫 Authentication required"
-        }
+        return "🚫 Authentication required"
 
     try:
         # Add LIMIT if not present
@@ -1321,25 +1241,17 @@ async def execute_sql_query(
                 status='SUCCESS'
             )
 
-            return {
-                "status": "success",
-                "row_count": 0,
-                "execution_time": f"{exec_time:.3f}s",
-                "message": "Query executed successfully but returned no results."
-            }
+            return "No results found."
 
-        # Format results with timing
+        # Format results - clean output without header/footer
         formatting_start = time.time()
 
         result_lines = []
-        result_lines.append(f"📊 Found {row_count} transaction(s)\n")
-        result_lines.append(f"⏱️  Retrieved in {time.time() - exec_start_time:.3f}s\n\n")
-        result_lines.append("=" * 100 + "\n")
 
         # Format each row
         for idx, row in enumerate(results, 1):
             result_lines.append(f"\n🔹 Transaction #{idx}\n")
-            result_lines.append("-" * 100 + "\n")
+            result_lines.append("-" * 80 + "\n")
 
             for col, value in row.items():
                 if 'amount' in col.lower():
@@ -1347,17 +1259,12 @@ async def execute_sql_query(
                 elif 'date' in col.lower() or 'at' in col.lower():
                     result_lines.append(f"  📅 {col}: {value}\n")
                 elif 'status' in col.lower():
-                    emoji = "✅" if value == "SUCCESS" else "❌"
+                    emoji = "✅" if value == "SUCCESS" else "❌" if value == "FAILED" else "⏳"
                     result_lines.append(f"  {emoji} {col}: {value}\n")
                 elif 'id' in col.lower():
                     result_lines.append(f"  🆔 {col}: {value}\n")
                 else:
                     result_lines.append(f"  • {col}: {value}\n")
-
-        result_lines.append("\n" + "=" * 100 + "\n")
-        result_lines.append(f"\n✅ Total: {row_count} transaction(s)\n")
-        result_lines.append(f"⏱️  Execution time: {time.time() - exec_start_time:.3f}s\n")
-        result_lines.append(f"📊 Data processed: {query_job.total_bytes_processed or 0:,} bytes\n")
 
         output_format_time = time.time() - formatting_start
         exec_time = time.time() - exec_start_time
@@ -1376,23 +1283,14 @@ async def execute_sql_query(
             status='SUCCESS'
         )
         
-        return {
-            "status": "success",
-            "row_count": row_count,
-            "execution_time": f"{exec_time:.3f}s",
-            "bq_execution_time": f"{bq_time:.3f}s",
-            "bytes_processed": query_job.total_bytes_processed if query_job.total_bytes_processed else 0,
-            "columns": column_names,
-            "results": "".join(result_lines),
-            "raw_data": results,
-            "message": f"✅ Successfully retrieved {row_count} transaction(s)"
-        }
+        # Return ONLY the formatted transactions - no header/footer
+        return "".join(result_lines)
         
     except Exception as e:
         exec_time = time.time() - exec_start_time
         error_msg = f"❌ Error executing query: {str(e)}"
         
-        log_query_attempt(current_user, sql_query, 'ERROR', error=str(e))
+        log_query_attempt(current_user, sql_query, 'ERROR', reason=str(e))
         
         log_performance_metric(
             user=current_user,
@@ -1403,12 +1301,7 @@ async def execute_sql_query(
             status='ERROR'
         )
         
-        return {
-            "status": "error",
-            "execution_time": f"{exec_time:.3f}s",
-            "message": error_msg
-        }
-    
+        return error_msg
 
 @mcp.tool
 async def execute_sql_query_streaming(
