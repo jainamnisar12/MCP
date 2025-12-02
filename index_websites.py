@@ -164,33 +164,33 @@ def index_websites():
     print(f"\n{'='*80}\n")
 
     # COMMENTED OUT: BigQuery insertion
-    # print("\n[3/4] Storing in BigQuery...")
-    # try:
-    #     vector_store = NewBigQueryVectorStore(dataset_name=config.BIGQUERY_DATASET)
-    #     
-    #     # Ensure table exists (it should, but good to check)
-    #     vector_store.create_embeddings_table()
-    #     
-    #     # Insert embeddings with source_type='website'
-    #     success = vector_store.insert_embeddings(
-    #         embeddings_data=all_embeddings_data,
-    #         source_type="website"
-    #     )
-    #     
-    #     if success:
-    #         print("\n" + "="*60)
-    #         print("✅ WEBSITES INDEXED SUCCESSFULLY!")
-    #         print("="*60)
-    #         return True
-    #     else:
-    #         print("❌ Failed to insert embeddings")
-    #         return False
-    #
-    # except Exception as e:
-    #     print(f"❌ Error storing in BigQuery: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-    #     return False
+    print("\n[3/4] Storing in BigQuery...")
+    try:
+        vector_store = NewBigQueryVectorStore(dataset_name=config.BIGQUERY_DATASET)
+        
+        # Ensure table exists (it should, but good to check)
+        vector_store.create_embeddings_table()
+        
+        # Insert embeddings with source_type='website'
+        success = vector_store.insert_embeddings(
+            embeddings_data=all_embeddings_data,
+            source_type="website"
+        )
+        
+        if success:
+            print("\n" + "="*60)
+            print("✅ WEBSITES INDEXED SUCCESSFULLY!")
+            print("="*60)
+            return True
+        else:
+            print("❌ Failed to insert embeddings")
+            return False
+    
+    except Exception as e:
+        print(f"❌ Error storing in BigQuery: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
     print("\n" + "="*60)
     print("✅ CHUNKS LOGGED SUCCESSFULLY (NOT PUSHED TO BIGQUERY)")
