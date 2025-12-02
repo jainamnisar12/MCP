@@ -379,7 +379,7 @@ def ask_upi_document(question: str) -> str:
                 results_web = bq_vector_store.similarity_search(
                     query_embedding=query_embedding,
                     k=5,
-                    similarity_threshold=0.7,
+                    similarity_threshold=0.6,
                     source_type="website"
                 )
                 
