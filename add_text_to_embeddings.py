@@ -43,7 +43,7 @@ def add_text_chunks_to_bigquery(
     print("="*80)
     print(f"Source: {source_name}")
     print(f"Number of chunks: {len(text_chunks)}")
-    print(f"Model: text-embedding-004")
+    print(f"Model: gemini-embedding-001")
     print(f"Target table: vector_embeddings_new")
     print("="*80 + "\n")
     
@@ -51,7 +51,7 @@ def add_text_chunks_to_bigquery(
     print("[1/4] Initializing embeddings and BigQuery client...")
     try:
         embeddings = VertexAIEmbeddings(
-            model_name="text-embedding-004",
+            model_name="gemini-embedding-001",
             project=config.GCP_PROJECT_ID,
             location=config.GCP_LOCATION
         )
@@ -86,7 +86,7 @@ def add_text_chunks_to_bigquery(
             chunk_metadata = {
                 "chunk_index": idx,
                 "chunk_length": len(text_chunk),
-                "model": "text-embedding-004",
+                "model": "gemini-embedding-001",
                 "embedding_dimension": len(embedding_vector),
                 "timestamp": datetime.utcnow().isoformat()
             }
@@ -122,7 +122,7 @@ def add_text_chunks_to_bigquery(
     try:
         success = vector_store.insert_embeddings(
             embeddings_data=embeddings_data,
-            source_type="text"
+            source_type="website"  # Changed from "text" to "website" so agent picks it up
         )
         
         if success:
