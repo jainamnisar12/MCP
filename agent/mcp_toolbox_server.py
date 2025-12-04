@@ -367,7 +367,7 @@ def ask_upi_document(question: str) -> str:
                 print(f"� Query embedding dimensions: {len(query_embedding)}")
                 print(f"📊 Query embedding (first 5 values): {query_embedding[:5]}")
                 
-                print(f"🔍 Searching new BigQuery table for PDF embeddings with similarity threshold: 0.3")
+                print(f"🔍 Searching new BigQuery table for PDF embeddings with similarity threshold: 0.6")
                 results_pdf = bq_vector_store.similarity_search(
                     query_embedding=query_embedding,
                     k=5,
@@ -375,7 +375,7 @@ def ask_upi_document(question: str) -> str:
                     source_type="pdf"
                 )
                 
-                print(f"🔍 Searching new BigQuery table for Website embeddings with similarity threshold: 0.3")
+                print(f"🔍 Searching new BigQuery table for Website embeddings with similarity threshold: 0.6")
                 results_web = bq_vector_store.similarity_search(
                     query_embedding=query_embedding,
                     k=5,

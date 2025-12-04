@@ -480,7 +480,7 @@ async def chat_websocket(websocket: WebSocket, session_token: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def get_chat_ui():
-    return HTMLResponse(content='''<!DOCTYPE html>
+    return HTMLResponse(content=r'''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
@@ -562,21 +562,30 @@ async def get_chat_ui():
             fd.append('user_type', document.getElementById('userType').value);
             fd.append('auth_method', 'vpa');
             this.disabled = true; this.textContent = 'Authenticating...';
-            fetch('/api/authenticate', {method:'POST',body:fd}).then(r=>r.json().then(d=>({s:r.status,d}))).then(r=>{
-                if(r.s===200){ 
-                    sessionToken=r.d.session_token; 
-                    document.getElementById('userInfo').textContent='👤 '+r.d.user_name;
-                    document.getElementById('authContainer').classList.add('hidden'); 
-                    document.getElementById('chatContainer').classList.add('show');
-                    connectWS();
-                    addMsg('assistant','Welcome! How can I help you?');
-                } else { 
-                    document.getElementById('errorMessage').textContent=r.d.error; 
+            fetch('/api/authenticate', {method:'POST',body:fd})
+                .then(r=>r.json().then(d=>({s:r.status,d})))
+                .then(r=>{
+                    if(r.s===200){ 
+                        sessionToken=r.d.session_token; 
+                        document.getElementById('userInfo').textContent='👤 '+r.d.user_name;
+                        document.getElementById('authContainer').classList.add('hidden'); 
+                        document.getElementById('chatContainer').classList.add('show');
+                        connectWS();
+                        addMsg('assistant','Welcome! How can I help you?');
+                    } else { 
+                        document.getElementById('errorMessage').textContent=r.d.error; 
+                        document.getElementById('errorMessage').classList.add('show');
+                        document.getElementById('authButton').disabled=false; 
+                        document.getElementById('authButton').textContent='🔑 Authenticate'; 
+                    }
+                })
+                .catch(err=>{
+                    console.error('Auth error:', err);
+                    document.getElementById('errorMessage').textContent='Connection error: '+err.message; 
                     document.getElementById('errorMessage').classList.add('show');
                     document.getElementById('authButton').disabled=false; 
                     document.getElementById('authButton').textContent='🔑 Authenticate'; 
-                }
-            });
+                });
         };
         
         function connectWS() {
@@ -631,11 +640,20 @@ async def get_chat_ui():
             ws.send(JSON.stringify({message: m})); 
         }
         
+        function parseMarkdown(text) {
+            // Simple markdown parser for bold and lists
+            return text
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')  // Bold
+                .replace(/\*(.*?)\*/g, '<em>$1</em>')  // Italic
+                .replace(/\n\* /g, '\n• ')  // Convert * to bullet
+                .replace(/\n/g, '<br>');  // Line breaks
+        }
+        
         function addMsg(t, c) { 
             var d = document.createElement('div'); 
             d.className = 'message ' + t;
             d.innerHTML = '<div class="message-content"></div>'; 
-            d.querySelector('.message-content').textContent = c;
+            d.querySelector('.message-content').innerHTML = parseMarkdown(c);
             document.getElementById('messages').appendChild(d); 
             document.getElementById('messages').scrollTop = 999999; 
         }
@@ -643,7 +661,7 @@ async def get_chat_ui():
         function updateLast(c) { 
             var l = document.getElementById('messages').lastElementChild;
             if(l) {
-                l.querySelector('.message-content').textContent = c; 
+                l.querySelector('.message-content').innerHTML = parseMarkdown(c); 
                 document.getElementById('messages').scrollTop = 999999;
             }
         }
