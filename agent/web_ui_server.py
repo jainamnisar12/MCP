@@ -26,6 +26,14 @@ from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 from customer_auth import CustomerAuthenticator
 
+# Import security controls
+from security_controls import (
+    validate_user_input,
+    validate_tool_call,
+    get_security_statistics,
+    security_validator
+)
+
 # --- Performance Metrics Setup ---
 @dataclass
 class PerformanceMetrics:
@@ -59,6 +67,7 @@ class ChatSession:
         self.user_type = user_type
         self.session_token = session_token
         self.conversation_history = []
+        self.security_events = []  # Track security events for this session
         
         if user_type == 'customer':
             self.current_user = user_data['name']
@@ -110,7 +119,30 @@ class ChatSession:
     
     async def send_message(self, message: str):
         """Stream response in real-time with granular performance tracking"""
-        
+
+        # SECURITY CHECK: Validate user input before processing
+        is_allowed, rejection_message = validate_user_input(
+            message,
+            self.current_user,
+            self.user_type
+        )
+
+        if not is_allowed:
+            # Log security event for this session
+            self.security_events.append({
+                'timestamp': datetime.now().isoformat(),
+                'query': message[:100],
+                'action': 'BLOCKED',
+                'reason': 'Security threat detected'
+            })
+
+            # Yield security alert message
+            security_message = f"🚫 {rejection_message}"
+            for i in range(0, len(security_message), 10):
+                yield security_message[i:i+10]
+                await asyncio.sleep(0.01)
+            return
+
         # Start performance tracking
         start_time = time.time()
         agent_start_time = None
@@ -432,12 +464,38 @@ async def get_sample_merchants():
         authenticator = CustomerAuthenticator()
         merchants = authenticator.get_sample_merchants(limit=5)
         return {"merchants": [
-            {"vpa": m['merchant_vpa'], "name": m['merchant_name'], 
+            {"vpa": m['merchant_vpa'], "name": m['merchant_name'],
              "category": m['category'] or 'Other', "password": m['password']}
             for m in merchants
         ]}
     except:
         return {"merchants": []}
+
+
+@app.get("/api/security-stats/{session_token}")
+async def get_security_stats(session_token: str):
+    """Get security statistics for the current session"""
+    try:
+        session = active_sessions.get(session_token)
+        if not session:
+            return JSONResponse(status_code=404, content={"error": "Session not found"})
+
+        # Get global security statistics
+        global_stats = get_security_statistics()
+
+        # Get session-specific security events
+        session_events = session.security_events
+
+        return {
+            "global": global_stats,
+            "session": {
+                "total_queries": len(session.conversation_history),
+                "blocked_queries": len(session_events),
+                "security_events": session_events[-5:]  # Last 5 events
+            }
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.websocket("/ws/chat/{session_token}")
@@ -513,11 +571,18 @@ async def get_chat_ui():
         .input-container input { flex: 1; padding: 15px; border: 2px solid #eee; border-radius: 25px; font-size: 16px; }
         .input-container button { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; padding: 15px 30px; border-radius: 25px; cursor: pointer; }
         .hidden { display: none; }
+        .security-badge { display: inline-block; margin-left: 10px; padding: 5px 12px; background: rgba(255,255,255,0.2); border-radius: 15px; font-size: 12px; }
+        .security-stats { padding: 10px; margin-top: 10px; background: rgba(255,255,255,0.1); border-radius: 8px; font-size: 12px; }
+        .blocked-message { background: #ffebee !important; color: #c62828 !important; border-left: 4px solid #c62828; }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header"><h1>🔐 Secure Banking Assistant</h1><div id="userInfo"></div></div>
+        <div class="header">
+            <h1>🔐 Secure Banking Assistant<span class="security-badge" id="securityBadge">🛡️ Protected</span></h1>
+            <div id="userInfo"></div>
+            <div class="security-stats" id="securityStats" style="display:none;"></div>
+        </div>
         <div class="auth-container" id="authContainer">
             <div class="form-group"><label>User Type</label><select id="userType"><option value="customer">Customer</option><option value="merchant">Merchant</option></select></div>
             <div class="form-group"><label id="identifierLabel">VPA</label><input type="text" id="identifier" placeholder="example@okicici" /></div>
@@ -592,9 +657,12 @@ async def get_chat_ui():
             var url = (location.protocol==='https:'?'wss:':'ws:')+'//'+location.host+'/ws/chat/'+sessionToken;
             console.log('Connecting to:', url);
             ws = new WebSocket(url);
-            
+
             ws.onopen = function() {
                 console.log('WebSocket connected');
+                updateSecurityStats();
+                // Update security stats every 30 seconds
+                setInterval(updateSecurityStats, 30000);
             };
             
             ws.onmessage = function(e) {
@@ -658,12 +726,49 @@ async def get_chat_ui():
             document.getElementById('messages').scrollTop = 999999; 
         }
         
-        function updateLast(c) { 
+        function updateLast(c) {
             var l = document.getElementById('messages').lastElementChild;
             if(l) {
-                l.querySelector('.message-content').innerHTML = parseMarkdown(c); 
+                var content = l.querySelector('.message-content');
+                content.innerHTML = parseMarkdown(c);
+                // Check if this is a blocked message
+                if(c.includes('🚫') && c.includes('SECURITY')) {
+                    content.classList.add('blocked-message');
+                }
                 document.getElementById('messages').scrollTop = 999999;
             }
+        }
+
+        function updateSecurityStats() {
+            if(!sessionToken) return;
+            fetch('/api/security-stats/' + sessionToken)
+                .then(r => r.json())
+                .then(data => {
+                    var statsDiv = document.getElementById('securityStats');
+                    var badge = document.getElementById('securityBadge');
+
+                    if(data.global && data.session) {
+                        var blocked = data.session.blocked_queries || 0;
+                        var total = data.session.total_queries || 0;
+
+                        // Update badge
+                        if(blocked > 0) {
+                            badge.textContent = '🛡️ ' + blocked + ' Blocked';
+                            badge.style.background = 'rgba(255,0,0,0.3)';
+                        } else {
+                            badge.textContent = '🛡️ Protected';
+                            badge.style.background = 'rgba(255,255,255,0.2)';
+                        }
+
+                        // Update stats
+                        statsDiv.innerHTML =
+                            'Session: ' + total + ' queries, ' + blocked + ' blocked | ' +
+                            'Global: ' + data.global.total_queries_checked + ' checked, ' +
+                            data.global.total_threats_blocked + ' threats blocked';
+                        statsDiv.style.display = 'block';
+                    }
+                })
+                .catch(err => console.error('Failed to fetch security stats:', err));
         }
     </script>
 </body>
@@ -671,5 +776,21 @@ async def get_chat_ui():
 
 
 if __name__ == "__main__":
-    print("🚀 Starting Web UI Server at http://localhost:8000")
+    print("\n" + "="*70)
+    print("🚀 SECURE BANKING ASSISTANT - WEB UI SERVER")
+    print("="*70)
+    print("Server: http://localhost:8000")
+    print("\n🛡️ Security Controls: ACTIVE")
+    print("   • Prompt Injection Detection: ENABLED")
+    print("   • Jailbreak Detection: ENABLED")
+    print("   • Data Exfiltration Prevention: ENABLED")
+    print("   • Tool Misuse Monitoring: ENABLED")
+    print("   • Real-time Security Stats: ENABLED")
+    print("\n📊 Monitoring:")
+    print("   • Security events: security_events.log")
+    print("   • Performance metrics: performance_metrics.log")
+    print("\n🔐 Authentication Required")
+    print("   • Customer: VPA + PIN")
+    print("   • Merchant: VPA + Password")
+    print("="*70 + "\n")
     uvicorn.run(app, host="0.0.0.0", port=8000)

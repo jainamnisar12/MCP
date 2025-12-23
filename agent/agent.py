@@ -24,6 +24,14 @@ from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 from google.genai import types
 
+# Import security controls
+from security_controls import (
+    validate_user_input,
+    validate_tool_call,
+    get_security_statistics,
+    security_validator
+)
+
 # --- Performance Metrics Classes ---
 perf_logger = logging.getLogger('agent_performance')
 perf_logger.setLevel(logging.INFO)
@@ -530,7 +538,14 @@ if __name__ == "__main__":
     print("\n📊 Performance Monitoring: ENABLED")
     print("   • Metrics logged to: agent_performance.log")
     print("   • Real-time timing displayed per query")
-    
+
+    print("\n🛡️ Security Controls: ACTIVE")
+    print("   • Prompt Injection Detection: ENABLED")
+    print("   • Jailbreak Detection: ENABLED")
+    print("   • Data Exfiltration Prevention: ENABLED")
+    print("   • Tool Misuse Monitoring: ENABLED")
+    print("   • Security events logged to: security_events.log")
+
     print("=" * 60)
     print("\nType 'quit', 'exit', or 'q' to stop.")
     print("All queries are logged for security and compliance.\n")
@@ -560,14 +575,34 @@ if __name__ == "__main__":
                 # Print detailed performance summary
                 if conversation_count > 0:
                     performance_tracker.print_summary(CURRENT_USER)
-                
+
+                # Print security summary
+                security_stats = get_security_statistics()
+                if security_stats['total_queries_checked'] > 0:
+                    print("\n" + "="*60)
+                    print("🛡️ SECURITY SUMMARY")
+                    print("="*60)
+                    print(f"Total Queries Scanned: {security_stats['total_queries_checked']}")
+                    print(f"Threats Detected: {security_stats['total_threats_detected']}")
+                    print(f"Threats Blocked: {security_stats['total_threats_blocked']}")
+                    print(f"Detection Rate: {security_stats['threat_detection_rate']*100:.1f}%")
+                    print(f"Block Rate: {security_stats['block_rate']*100:.1f}%")
+                    print("="*60)
+
                 print("\n🔒 Your session has been securely closed.\n")
                 break
             
             # Skip empty input
             if not user_input:
                 continue
-            
+
+            # SECURITY CHECK: Validate user input before processing
+            is_allowed, rejection_message = validate_user_input(user_input, CURRENT_USER, USER_TYPE)
+
+            if not is_allowed:
+                print(f"\n{rejection_message}\n")
+                continue  # Skip this query and prompt for next input
+
             conversation_count += 1
             query_number = conversation_count
             
@@ -690,7 +725,20 @@ if __name__ == "__main__":
             # Print detailed performance summary
             if conversation_count > 0:
                 performance_tracker.print_summary(CURRENT_USER)
-            
+
+            # Print security summary
+            security_stats = get_security_statistics()
+            if security_stats['total_queries_checked'] > 0:
+                print("\n" + "="*60)
+                print("🛡️ SECURITY SUMMARY")
+                print("="*60)
+                print(f"Total Queries Scanned: {security_stats['total_queries_checked']}")
+                print(f"Threats Detected: {security_stats['total_threats_detected']}")
+                print(f"Threats Blocked: {security_stats['total_threats_blocked']}")
+                print(f"Detection Rate: {security_stats['threat_detection_rate']*100:.1f}%")
+                print(f"Block Rate: {security_stats['block_rate']*100:.1f}%")
+                print("="*60)
+
             print("\n🔒 Your session has been securely closed.\n")
             break
             
